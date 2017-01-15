@@ -28,6 +28,8 @@ import qualified Data.HashMap.Strict  as HM
 import qualified Data.HashSet         as HS
 import qualified Data.Text            as T
 
+import           Text.Read            (Read (..))
+
 import           Evaluable
 import           Utils
 
@@ -35,7 +37,13 @@ import           Utils
 -- Exported: Name (..)
 
 newtype Name = MkName { fromName :: Text }
-             deriving (Eq, Show, Read, Generic, Hashable)
+             deriving (Eq, Generic, Hashable)
+
+instance Show Name where
+  show (MkName n) = show n
+
+instance Read Name where
+  readPrec = readPrec |> fmap MkName
 
 instance IsString Name where
   fromString = T.pack .> MkName
@@ -55,11 +63,11 @@ instance Hashable DTerm
 instance IsString DTerm where
   fromString = T.pack .> DConst
 
-instance (MonadThrow m) => Evaluable m DTerm where
+instance (MonadTC m) => Evaluable m DTerm where
   type Normal DTerm = DTerm
   eval = evaluateTerm
 
-evaluateTerm :: (MonadThrow m) => DTerm -> m DTerm
+evaluateTerm :: (MonadTC m) => DTerm -> m DTerm
 evaluateTerm DType      = pure DType
 evaluateTerm (DConst i) = pure $ DConst i
 evaluateTerm (D_ el)    = evaluateElim el
@@ -78,14 +86,15 @@ instance Hashable DElim
 instance IsString DElim where
   fromString = fromString .> DRef
 
-instance (MonadThrow m) => Evaluable m DElim where
+instance (MonadTC m) => Evaluable m DElim where
   type Normal DElim = DTerm
   eval = evaluateElim
 
-evaluateElim :: (MonadThrow m) => DElim -> m DTerm
+evaluateElim :: (MonadTC m) => DElim -> m DTerm
 evaluateElim (tm ::: _)                     = evaluateTerm tm
 evaluateElim ((Dλ n b ::: DΠ _ vT _) :@: s) = evaluateTerm
                                               $ b `subst` [n :~> (s ::: vT)]
+evaluateElim (DRef n)                       = lookupVar n
 evaluateElim elim                           = throwElimEvaluationError elim
 
 --------------------------------------------------------------------------------

@@ -1,9 +1,15 @@
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE TypeOperators         #-}
 
-module Main (module Main, module Types, module Evaluable) where
+module Main
+  ( module Main
+  , module Types
+  , module Evaluable
+  , module Utils
+  ) where
 
 import           Control.Monad.Except
 
@@ -22,11 +28,14 @@ ty ∋ (D_ e)                      = do inferred <- inferType e
 ty ∋ tm                          = throwTypeSynthesisError ty tm
 
 inferType :: DElim -> TCM DTerm
-inferType (tm ::: ty) = DType ∋ ty >> ty ∋ tm >> evaluateTerm ty
+inferType (tm ::: ty) = DType ∋ ty >> ty ∋ tm >> eval ty
 inferType (el :@: tm) = do DΠ v vT bT <- inferType el
                            vT ∋ tm
-                           evaluateTerm $ bT `subst` [v :~> (tm ::: vT)]
-inferType (DRef n)    = lookupVar n >>= evaluateTerm
+                           eval $ bT `subst` [v :~> (tm ::: vT)]
+inferType (DRef n)    = lookupVar n >>= eval
+
+debug :: DElim
+debug = (Dλ "x" (D_ "x")) ::: (DΠ "x" DType (D_ "x"))
 
 main :: IO ()
 main = pure ()
