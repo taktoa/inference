@@ -1,11 +1,20 @@
 module Utils
-  ( (<.), (.>)
-  , (<|), (|>)
-  , (<#>)
-  , module Data.Bifunctor
+  ( (<.), (.>), (<|), (|>), (<#>)
+  , liftMaybe
+  , compose
+  , module Exported
   ) where
 
-import           Data.Bifunctor
+import           Data.HashMap.Strict as Exported (HashMap)
+import           Data.HashSet        as Exported (HashSet)
+import           Data.Text           as Exported (Text)
+
+import           Data.Bifunctor      as Exported
+import           Data.Semigroup      as Exported
+import           Data.String         as Exported (IsString (..))
+
+import           Data.Hashable       as Exported (Hashable)
+import           GHC.Generics        as Exported (Generic)
 
 -- | Function composition.
 (<.) :: (b -> c) -> (a -> b) -> a -> c
@@ -36,3 +45,12 @@ infixl 0 |>
 x <#> f = f <$> x
 infixl 4 <#>
 {-# INLINE (<#>) #-}
+
+-- | FIXME: doc
+liftMaybe :: (Applicative f) => Maybe a -> f a -> f a
+liftMaybe (Just x) _   = pure x
+liftMaybe Nothing  err = err
+
+-- | FIXME: doc
+compose :: [a -> a] -> a -> a
+compose = foldr (.>) id
