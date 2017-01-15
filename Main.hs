@@ -1,57 +1,37 @@
-{-# LANGUAGE DataKinds                  #-}
 {-# LANGUAGE DeriveFunctor              #-}
 {-# LANGUAGE DeriveGeneric              #-}
+{-# LANGUAGE DuplicateRecordFields      #-}
 {-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE FlexibleInstances          #-}
-{-# LANGUAGE FunctionalDependencies     #-}
 {-# LANGUAGE GADTs                      #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE KindSignatures             #-}
 {-# LANGUAGE MultiParamTypeClasses      #-}
-{-# LANGUAGE RankNTypes                 #-}
-{-# LANGUAGE TypeFamilies               #-}
+{-# LANGUAGE OverloadedLabels           #-}
 {-# LANGUAGE TypeOperators              #-}
+
 module Main where
 
--- data FunctorT f a b = FunctorT (forall a b. ((a -> b) -> f a -> f b))
--- data MonoidT a = MonoidT a (a -> a -> a)
---
--- data View sig a = Var Name | Abs Name a | Term a (sig a)
---
--- instance Functor sig => Functor (View sig) where
---   fmap _ (Var n)    = n
---   fmap f (Abs n a)  = Abs n (f a)
---   fmap f (Term a s) = Term (f a) (f <$> s)
---
--- class (Functor sig) => IsABT var sig t abt | abt -> var sig t where
---     inside  :: View sig t -> t
---     outside :: t -> View sig t
---     free    :: View sig t -> [var]
---     var     :: var -> t
---     (\\)    :: var -> t -> t
---     term    :: sig t -> t
---     subst   :: t -> (var, t) -> t
---  Signature a
-
-
-
-
-
-
-
-
-
-
-
 import           Control.Applicative
+import           Control.Monad.Catch
 import           Control.Monad.State
+
 import           Data.Hashable       (Hashable)
+
 import           Data.HashMap.Strict (HashMap)
-import qualified Data.HashMap.Strict as Map
+import qualified Data.HashMap.Strict as HM
+
 import           Data.HashSet        (HashSet)
-import qualified Data.HashSet        as Set
+import qualified Data.HashSet        as HS
+
 import           Data.Monoid
 import           Data.String
+
+import           Data.Text           (Text)
+import qualified Data.Text           as T
+
+import Numeric.Natural
+
 import           GHC.Generics        (Generic)
 
 (.>) :: (a -> b) -> (b -> c) -> a -> c
@@ -79,21 +59,30 @@ infixl 0 #>
 infixr 0 <#
 {-# INLINE (<#) #-}
 
-newtype Name = Name String
+newtype Name = Name { fromName :: Text }
              deriving (Eq, Show, Read, Generic)
 
+data InferenceError
+  = UnboundVariableError
+    { _context :: Int
+    , _name    :: Name
+    }
+  | TypeSynthesisError
+    {
+    }
+
 instance IsString Name where
-  fromString = Name
+  fromString = T.pack .> Name
 
 data DTerm = DType
-           | DConst String
+           | DConst Text
            | D_ DElim
            | DΠ Name DTerm DTerm
            | Dλ Name DTerm
            deriving (Eq, Show, Read, Generic)
 
 instance IsString DTerm where
-  fromString = DConst
+  fromString = T.pack .> DConst
 
 data DElim = DTerm ::: DTerm
            | DElim :@: DTerm
@@ -101,7 +90,7 @@ data DElim = DTerm ::: DTerm
            deriving (Eq, Show, Read, Generic)
 
 instance IsString DElim where
-  fromString = DRef . fromString
+  fromString = fromString .> DRef
 
 data DConstraint = DTerm :≡: DTerm
                  deriving (Eq, Show, Read, Generic)
@@ -149,7 +138,7 @@ tell :: (Monad m, Monoid s) => s -> StateT s m ()
 tell s = modify (<> s)
 
 with :: [(Name, DTerm)] -> TCM a -> TCM a
-with bs m = TCM (tell (Ctx (Map.fromList bs) mempty)) >> m
+with bs m = TCM (tell (Ctx (HM.fromList bs) mempty)) >> m
 
 liftMaybe :: String -> Maybe a -> TCM a
 liftMaybe _ (Just x) = pure x
@@ -157,11 +146,11 @@ liftMaybe e Nothing  = fail e
 
 retrieveVar :: Name -> TCM DTerm
 retrieveVar n = let err = "Could not find variable: " <> show n
-                in get >>= _environment .> Map.lookup n .> liftMaybe err
+                in get >>= _environment .> HM.lookup n .> liftMaybe err
 
 (∋) :: DTerm -> DTerm -> TCM ()
 DType ∋ DType                    = pure ()
-DType ∋ (DΠ v vT bT)             = (DType ∋ vT) >> with [(v, vT)] (DType ∋ bT)
+DType ∋ (DΠ v vT bT)             = DType ∋ vT >> with [(v, vT)] (DType ∋ bT)
 (DΠ v vT bT) ∋ (Dλ n b) | v == n = with [(v, vT)] $ b ∋ bT
 tm ∋ (D_ e)                      = do ty  <- inferType e
                                       tm' <- evaluateTerm tm
@@ -184,41 +173,12 @@ evaluateTerm term       = fail (show term)
 
 evaluateElim :: DElim -> TCM DTerm
 evaluateElim (tm ::: _)                     = evaluateTerm tm
-evaluateElim ((Dλ n b ::: DΠ _ vT _) :@: s) = evaluateTerm $ b `subst` [n :~> (s ::: vT)]
+evaluateElim ((Dλ n b ::: DΠ _ vT _) :@: s) = evaluateTerm
+                                              $ b `subst` [n :~> (s ::: vT)]
 evaluateElim elim                           = fail (show elim)
 
 runTCM :: TCM a -> Either String a
 runTCM (TCM tcm) = evalStateT tcm mempty
 
 main :: IO ()
-main = return ()
-
--- data FieldSize = FieldSize Int
---
--- type Level = Int -- should be a natural number
---
--- data DSort = Type Level
---
--- -- data DTerm = Struct [DType]
--- --            | Union [DType]
--- --            | Function DType DType
---
--- data DArgInfo =
---
--- data DArg a = CArg DArgInfo a
---
--- data DElim' a = CApply (DArg a)
---               | Proj Name
---
--- data DTerm = CVar Name [DElim' DTerm]
---
--- data DType' a = CElement { _sort  :: DSort
---                          , _value :: a }
---
--- type DType = DType' DTerm
---
--- -- LAYER 3
---
--- -- data Constructor = Constructor [Type]
---
--- -- data Type = ADT [Constructor]
+main = pure ()
