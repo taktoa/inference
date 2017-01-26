@@ -26,8 +26,11 @@ module Main
 import           Control.Applicative
 import           Control.Arrow                     ((***))
 import           Control.Monad.Except
+import qualified Control.Monad.Fail                as Fail
 import           Data.Bifunctor
+import           Data.Either
 import           Data.Foldable                     (asum)
+import           Data.Maybe
 import           Data.Semigroup
 
 import           Data.Kind
@@ -40,10 +43,6 @@ import           Data.Ord                          (comparing)
 import           Control.Lens                      hiding
                  ((.>), (<.), (<|), (|>))
 import           Data.Aeson.Lens
-
-import           Evaluable
-import           Types
-import           Utils
 
 import           Data.Vector                       (Vector)
 import qualified Data.Vector                       as V
@@ -68,7 +67,6 @@ import qualified Data.Aeson.Encode.Pretty          as A
 import qualified Data.Aeson.Types                  as A
 
 import           Data.Version
-import           Safe
 
 import qualified Language.PureScript.AST.Literals  as PS
 import qualified Language.PureScript.AST.SourcePos as PS
@@ -79,11 +77,18 @@ import qualified Language.PureScript.Types         as PS
 import           Language.PureScript.AST.Literals  (Literal (..))
 import           Language.PureScript.Names
 
+import           Evaluable
+import           Types
+import           Utils
+
 backtrace :: Text -> (JSON -> JParse a) -> JSON -> JParse a
 backtrace msg f v = f v <|> fail (T.unpack msg)
 
 choice :: (Alternative f) => [f a] -> f a
 choice = asum
+
+wrapP :: (FromJSON a) => (a -> JParse b) -> JSON -> JParse b
+wrapP f v = parseJSON v >>= f
 
 instance Foldable Literal where
   foldMap f (ArrayLiteral  xs) = foldMap f xs
@@ -136,19 +141,23 @@ data Binder a
                   , _binderBinder :: Binder a }
   deriving (Show, Functor, Foldable, Traversable)
 
-maybeToAlt :: (Alternative f) => Maybe a -> f a
-maybeToAlt = maybe empty pure
+maybeToM :: (Monad m) => String -> Maybe a -> m a
+maybeToM err = maybe (fail err) pure
 
 parseTagList :: [(Text, JSON -> JParse a)] -> JSON -> JParse a
-parseTagList mapping = backtrace "parseTagList"
+parseTagList mapping = {- id -} backtrace "parseTagList"
                        $ \val -> do (k, v) <- helper val
-                                    cb <- maybeToAlt (lookup k mapping)
-                                    cb v
+                                    cb <- lookupM k
+                                    cb v -- <|> failure3 k
   where
+    lookupM k = lookup k mapping |> maybeToM (failure1 k)
     helper (String k)                               = pure (k, Null)
     helper (Array (uncons -> Just (String k, [v]))) = pure (k, v)
     helper (Array (uncons -> Just (String k, v)))   = pure (k, Array v)
-    helper _                                        = empty
+    helper owise                                    = failure2 owise
+    failure1 x = fail $ "parseTagList: failed to look up key: " <> show x
+    failure2 x = fail $ "parseTagList: error code 2: " <> show x
+    failure3 x = fail $ "parseTagList: callback failed for " <> show x
 
 parseModuleName :: JSON -> JParse ModuleName
 parseModuleName = backtrace "parseModuleName"
@@ -159,7 +168,7 @@ parseIdent = backtrace "parseIdent"
              $ parseJSON .> fmap Ident
 
 parseBind :: (JSON -> a) -> JSON -> JParse (Bind a)
-parseBind cb = backtrace "parseBind"
+parseBind cb = {- id -} backtrace "parseBind"
                $ withObject "parseBind: not an object" (LHM.toList .> helper)
   where
     helper [(n, v)] = NonRec (cb Null) (Ident n) <$> parseExpr cb v
@@ -175,25 +184,25 @@ parseQualified p = backtrace "parseQualified"
                    $ \s -> qualifiedP s <|> unqualifiedP s
   where
     qualifiedP, unqualifiedP :: Text -> JParse (Qualified a)
-    qualifiedP s = case unsnoc (T.split (== '.') s)
+    qualifiedP s = case unsnoc $ T.split (== '.') s
                    of Just (xs, x) -> let mn = mkModName xs
                                       in Qualified (Just mn) <$> p x
-                      Nothing      -> empty
+                      Nothing      -> fail "parseQualified: no instance of '.'"
     unqualifiedP s = Qualified Nothing <$> p s
     mkModName = moduleNameFromString . T.intercalate "."
 
 parseLiteral :: (JSON -> JParse a) -> JSON -> JParse (Literal a)
-parseLiteral cb = backtrace "parseLiteral"
+parseLiteral cb = {- id -} backtrace "parseLiteral"
                   $ parseTagList dispatch >=> (fmap cb .> sequenceA)
   where
     dispatch :: [(Text, JSON -> JParse (Literal JSON))]
-    dispatch = [ ("IntLiteral",     go (NumericLiteral . Left))
-               , ("NumberLiteral",  go (NumericLiteral . Right))
+    dispatch = [ ("IntLiteral",     go (Left  .> NumericLiteral))
+               , ("NumberLiteral",  go (Right .> NumericLiteral))
                , ("StringLiteral",  go StringLiteral)
                , ("CharLiteral",    go CharLiteral)
                , ("BooleanLiteral", go BooleanLiteral)
                , ("ArrayLiteral",   go ArrayLiteral)
-               , ("ObjectLiteral",  go ObjectLiteral) ]
+               , ("ObjectLiteral",  go (LHM.toList .> ObjectLiteral)) ]
     go :: (FromJSON a) => (a -> Literal JSON) -> JSON -> JParse (Literal JSON)
     go f = parseJSON .> fmap f
 
@@ -209,22 +218,14 @@ parseBinder cb = backtrace "parseBinder"
     nullP, litP, varP, ctorP, namedP :: JSON -> JParse (Binder JSON)
     nullP    = pure . NullBinder
     litP     = parseLiteral (parseBinder id) .> fmap (LiteralBinder Null)
-    varP     = withList "parseBinder: varP: not an array"
-               $ \case [x] -> VarBinder Null <$> parseIdent x
-                       _   -> empty
-    ctorP    = withList "parseBinder: ctorP: not an array"
-               $ \case [vt, vn, vbs] -> CtorBinder Null
-                                        <$> parseQPName vt
-                                        <*> parseQPName vn
-                                        <*> parseBinderList id vbs
-                       _             -> empty
-    namedP   = withList "parseBinder: namedP: not an array"
-               $ \case [vi, vb] -> NamedBinder Null
-                                   <$> parseIdent vi
-                                   <*> parseBinder id vb
-                       _        -> empty
-
-    withList err lam = withArray err (V.toList .> lam)
+    varP     = wrapP $ \x             -> VarBinder Null <$> parseIdent x
+    ctorP    = wrapP $ \(vt, vn, vbs) -> CtorBinder Null
+                                         <$> parseQPName vt
+                                         <*> parseQPName vn
+                                         <*> parseBinderList id vbs
+    namedP   = wrapP $ \(vi, vb)      -> NamedBinder Null
+                                         <$> parseIdent vi
+                                         <*> parseBinder id vb
 
     parseBinderList :: (JSON -> a) -> JSON -> JParse [Binder a]
     parseBinderList f = parseJSON >=> mapM (parseBinder f)
@@ -234,11 +235,9 @@ parseBinder cb = backtrace "parseBinder"
 
 parseCaseAlt :: (JSON -> a) -> JSON -> JParse (CaseAlternative a)
 parseCaseAlt cb = backtrace "parseCaseAlt"
-                  ((withArray "parseCaseAlt: not an array"
-                    $ \case [vbs, vr] -> CaseAlternative
-                                         <$> bindersP vbs
-                                         <*> resultP vr
-                            _         -> empty)
+                  ((wrapP $ \(vbs, vr) -> CaseAlternative
+                                          <$> bindersP vbs
+                                          <*> resultP vr)
                    .> fmap (fmap cb))
   where
     bindersP :: JSON -> JParse [Binder JSON]
@@ -252,45 +251,56 @@ parseCaseAlt cb = backtrace "parseCaseAlt"
     guardP (g, e) = (,) <$> parseExpr id g <*> parseExpr id e
 
 parseExpr :: (JSON -> a) -> JSON -> JParse (Expr a)
-parseExpr cb = backtrace "parseExpr"
-               (parseTagList [ ("Literal",      litP)
-                             , ("Constructor",  ctorP)
-                             , ("Abs",          absP)
-                             , ("App",          appP)
-                             , ("Var",          varP)
-                             , ("Case",         caseP)
-                             , ("Let",          letP)
-                             , ("Accessor",     raP)
-                             , ("ObjectUpdate", ruP) ]
-                .> fmap (fmap cb))
+parseExpr cb = {- id -} backtrace "parseExpr"
+               $ (parseTagList [ ("Literal",      litP)
+                               , ("Constructor",  ctorP)
+                               , ("Abs",          absP)
+                               , ("App",          appP)
+                               , ("Var",          varP)
+                               , ("Case",         caseP)
+                               , ("Let",          letP)
+                               , ("Accessor",     raP)
+                               , ("ObjectUpdate", ruP) ]
+                  .> fmap (fmap cb))
   where
     exprP, litP, varP, ctorP, absP, appP, caseP, letP, raP, ruP
       :: JSON -> JParse (Expr JSON)
     exprP = parseExpr id
-    litP  = parseLiteral exprP .> fmap (Lit Null)
-    varP  = parseQualified (Ident .> pure) .> fmap (Var Null)
-    ctorP = wrapP $ \(t, n, as) -> Ctor Null
+    litP  = backtrace "litP" $
+            parseLiteral exprP .> fmap (Lit Null)
+    varP  = backtrace "varP" $
+            parseQualified (Ident .> pure) .> fmap (Var Null)
+    ctorP = backtrace "ctorP" $
+            wrapP $ \(t, n, as) -> Ctor Null
                                    <$> parseProperName t
                                    <*> parseProperName n
                                    <*> (parseJSON as >>= mapM parseIdent)
-    absP  = wrapP $ \(n, b)     -> Abs Null <$> parseIdent n <*> exprP b
-    appP  = wrapP $ \(f, x)     -> App Null <$> exprP f <*> exprP x
-    caseP = wrapP $ \(vs, as)   -> Case Null
+    absP  = backtrace "absP" $
+            wrapP $ \(n, b)     -> Abs Null <$> parseIdent n <*> exprP b
+    appP  = backtrace "appP" $
+            wrapP $ \(f, x)     -> App Null <$> exprP f <*> exprP x
+    caseP = backtrace "caseP" $
+            wrapP $ \(vs, as)   -> Case Null
                                    <$> arrayP vs exprP
                                    <*> arrayP as (parseCaseAlt id)
-    letP  = wrapP $ \(bs, e)    -> Let Null
-                                   <$> arrayP bs (parseBind id)
-                                   <*> exprP e
-    raP   = wrapP $ \(f, r)     -> RecAccess Null
+    letP  = backtrace "letP" $
+            wrapP $ \(bs, e)    -> backtrace (T.pack ("letP: \n" <> show bs <> "\n\n" <> show e))
+                                   (\x ->  Let Null
+                                           <$> arrayP bs (parseBind id)
+                                           <*> exprP e)
+                                   Null
+    raP   = backtrace "raP" $
+            wrapP $ \(f, r)     -> RecAccess Null
                                    <$> parseJSON f
                                    <*> exprP r
-    ruP   = wrapP $ \(r, fs)    -> RecUpdate Null
-                                   <$> exprP r
-                                   <*> arrayP fs (second exprP .> sequenceA)
+    ruP   = backtrace "ruP" $
+            wrapP $ \(r, fs)    -> backtrace (T.pack ("ruP: \n" <> show r <> "\n\n" <> show fs))
+                                   (\x ->  RecUpdate Null
+                                           <$> exprP r
+                                           <*> wrapP (LHM.toList .> mapM (second exprP .> sequenceA)) fs)
+                                   Null
     arrayP :: (FromJSON a) => JSON -> (a -> JParse b) -> JParse [b]
     arrayP v f = wrapP (mapM f) v
-    wrapP :: (FromJSON a) => (a -> JParse b) -> JSON -> JParse b
-    wrapP f v = parseJSON v >>= f
 
 instance Annotated Binder where
   extractAnn = _binderAnn
@@ -394,11 +404,13 @@ data Module a
 
 parseModule :: (ModuleName, JSON) -> JParse (Version, Module JSON)
 parseModule (name, v) = (,)
-                        <$> backtrace "versionP" versionP v
-                        <*> backtrace "moduleP"  moduleP  v
+                        <$> {- backtrace "versionP" -} versionP v
+                        <*> {- backtrace "moduleP"  -} moduleP  v
   where
-    versionP (String s) = maybe empty pure $ readMay (T.unpack s)
-    versionP _          = empty
+    versionP (Object o) = do String s <- o .: "builtWith"
+                             let readVersion = runReadP parseVersion
+                             either fail pure $ readVersion $ T.unpack s
+    versionP _          = fail "versionP: not an object"
     moduleP (Object o) = Module
                          <$> pure []
                          <*> pure name
@@ -406,11 +418,16 @@ parseModule (name, v) = (,)
                          <*> ((o .: "exports") >>= mapM parseIdent)
                          <*> ((o .: "foreign") >>= mapM parseIdent)
                          <*> ((o .: "decls")   >>= mapM (parseBind id))
-    moduleP _          = empty
+    moduleP _          = fail "moduleP: not an object"
     parseImport = parseModuleName .> fmap (\mn -> (Null, mn))
 
 parseModules :: JSON -> JParse [(Version, Module JSON)]
-parseModules = parseJSON >=> mapM (first moduleNameFromString .> parseModule)
+parseModules = parseJSON
+               >=>
+               LHM.toList .> mapM (first moduleNameFromString .> parseModule)
+
+moduleParse :: Text -> JSON -> Either String (Version, Module JSON)
+moduleParse mn = A.parseEither (curry parseModule (moduleNameFromString mn))
 
 newtype TopLevel = TopLevel [(Version, Module JSON)]
                  deriving (Show)
@@ -424,10 +441,11 @@ readGZ = LBS.readFile .> fmap GZ.decompress
 readJSON :: (FromJSON a) => LBS.ByteString -> IO a
 readJSON = A.eitherDecode .> either fail pure
 
-simpleFile, bigFile, completeFile :: IO JSON
+simpleFile, bigFile, completeFile, brokenFile :: IO JSON
 simpleFile   = readGZ "./data/simple.json.gz"   >>= readJSON
 bigFile      = readGZ "./data/big.json.gz"      >>= readJSON
 completeFile = readGZ "./data/complete.json.gz" >>= readJSON
+brokenFile   = readGZ "./data/broken.json.gz"   >>= readJSON
 
 maybeIO :: Maybe a -> IO a
 maybeIO = maybe (fail "maybeIO") pure
@@ -484,3 +502,22 @@ debug = (Dλ "x" (D_ "x")) ::: (DΠ "x" DType (D_ "x"))
 main :: IO ()
 main = do
   pure ()
+
+-- brokenKeys :: [Text]
+-- brokenKeys = [ "Text.Parsing.StringParser"
+--              , "Test.StrongCheck.Gen"
+--              , "PscIde.Server"
+--              , "Thermite"
+--              , "Text.Parsing.Parser.Expr"
+--              , "Text.Parsing.Parser.Language"
+--              , "Text.Parsing.StringParser.Expr"
+--              , "Test.QuickCheck.Gen" ]
+--
+-- brokens :: IO JSON
+-- brokens = do
+--   cf <- completeFile
+--   pure (cf & _Object %~ LHM.filterWithKey (\k _ -> k `elem` brokenKeys))
+--
+-- genBrokenFile :: IO ()
+-- genBrokenFile = let fp = "./data/broken.json.gz"
+--                 in brokens >>= A.encode .> GZ.compress .> LBS.writeFile fp
