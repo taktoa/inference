@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds             #-}
 {-# LANGUAGE DeriveFoldable        #-}
 {-# LANGUAGE DeriveFunctor         #-}
+{-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE DeriveTraversable     #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE FlexibleInstances     #-}
@@ -9,10 +10,9 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedLists       #-}
 {-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE PolyKinds             #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE StandaloneDeriving    #-}
 {-# LANGUAGE TypeFamilies          #-}
-{-# LANGUAGE TypeInType            #-}
 {-# LANGUAGE TypeOperators         #-}
 {-# LANGUAGE ViewPatterns          #-}
 
@@ -55,6 +55,7 @@ import qualified Data.ByteString                   as BS
 import qualified Data.ByteString.Lazy              as LBS
 
 import qualified Codec.Compression.GZip            as GZ
+import qualified Data.ByteString.Base64.Lazy       as Base64
 
 import           Data.Map.Strict                   (Map)
 import qualified Data.Map.Strict                   as Map
@@ -93,7 +94,7 @@ wrapP f v = parseJSON v >>= f
 instance Foldable Literal where
   foldMap f (ArrayLiteral  xs) = foldMap f xs
   foldMap f (ObjectLiteral xs) = foldMap (snd .> f) xs
-  foldMap f owise              = mempty
+  foldMap _ _                  = mempty
 
 instance Traversable Literal where
   sequenceA = helper
@@ -139,25 +140,25 @@ data Binder a
   | NamedBinder   { _binderAnn    :: a
                   , _binderName   :: Ident
                   , _binderBinder :: Binder a }
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic)
 
 maybeToM :: (Monad m) => String -> Maybe a -> m a
 maybeToM err = maybe (fail err) pure
 
 parseTagList :: [(Text, JSON -> JParse a)] -> JSON -> JParse a
-parseTagList mapping = backtrace "parseTagList"
-                       $ \val -> do (k, v) <- helper val
-                                    cb <- lookupM k
-                                    cb v -- <|> failure3 k
+parseTagList m = backtrace "parseTagList"
+                 $ \val -> do (k, v) <- helper val
+                              cb <- lookupM k
+                              cb v <|> failure3 k
   where
-    lookupM k = lookup k mapping |> maybeToM (failure1 k)
+    lookupM k = lookup k m |> maybeToM (failure1 k)
     helper (String k)                               = pure (k, Null)
     helper (Array (uncons -> Just (String k, [v]))) = pure (k, v)
     helper (Array (uncons -> Just (String k, v)))   = pure (k, Array v)
     helper owise                                    = failure2 owise
     failure1 x = fail $ "parseTagList: failed to look up key: " <> show x
-    failure2 x = fail $ "parseTagList: error code 2: " <> show x
-    failure3 x = fail $ "parseTagList: callback failed for " <> show x
+    failure2 x = fail $ "parseTagList: error code 2: "          <> show x
+    failure3 x = fail $ "parseTagList: callback failed for "    <> show x
 
 parseModuleName :: JSON -> JParse ModuleName
 parseModuleName = backtrace "parseModuleName"
@@ -322,7 +323,7 @@ data Expr a
   | RecUpdate { _exprAnn       :: a
               , _exprRURecord  :: Expr a
               , _exprRUChanges :: [(Text, Expr a)] }
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic)
 
 instance Annotated Expr where
   extractAnn = _exprAnn
@@ -334,7 +335,7 @@ data Bind a
            , _bindVal  :: Expr a }
   | Rec    { _bindAnn    :: a
            , _bindGroups :: [((a, Ident), Expr a)] }
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Functor, Foldable, Traversable, Generic)
 
 instance Annotated Bind where
   extractAnn = _bindAnn
@@ -346,7 +347,7 @@ data CaseAlternative a
   = CaseAlternative
     { _caseAltBinders :: [Binder a]
     , _caseAltResult  :: Either [(Guard a, Expr a)] (Expr a) }
-  deriving (Show)
+  deriving (Show, Generic)
 
 instance Functor CaseAlternative where
   fmap f (CaseAlternative cabs car)
@@ -374,12 +375,12 @@ data Meta
   | IsNewtype
   | IsTypeClassConstructor
   | IsForeign
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
 
 data ConstructorType
   = ProductType
   | SumType
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
 
 data Module a
   = Module
@@ -389,7 +390,7 @@ data Module a
     , _moduleExports  :: [Ident]
     , _moduleForeign  :: [Ident]
     , _moduleDecls    :: [Bind a] }
-  deriving (Show)
+  deriving (Show, Generic)
 
 parseModule :: (ModuleName, JSON) -> JParse (Version, Module JSON)
 parseModule (name, v) = (,)
@@ -430,11 +431,10 @@ readGZ = LBS.readFile .> fmap GZ.decompress
 readJSON :: (FromJSON a) => LBS.ByteString -> IO a
 readJSON = A.eitherDecode .> either fail pure
 
-simpleFile, bigFile, completeFile, brokenFile :: IO JSON
+simpleFile, bigFile, completeFile :: IO JSON
 simpleFile   = readGZ "./data/simple.json.gz"   >>= readJSON
 bigFile      = readGZ "./data/big.json.gz"      >>= readJSON
 completeFile = readGZ "./data/complete.json.gz" >>= readJSON
-brokenFile   = readGZ "./data/broken.json.gz"   >>= readJSON
 
 maybeIO :: Maybe a -> IO a
 maybeIO = maybe (fail "maybeIO") pure
@@ -468,6 +468,23 @@ jsonSize (Object o) = o |> LHM.toList |> fmap (snd .> jsonSize) |> sum
 jsonSize (Array  v) = v |> V.map jsonSize |> V.sum
 jsonSize _          = 1
 
+deriving instance Generic (Literal a)
+instance (ToJSON a) => ToJSON (CaseAlternative a)
+instance (ToJSON a) => ToJSON (Literal a)
+instance (ToJSON a) => ToJSON (Expr a)
+instance (ToJSON a) => ToJSON (Binder a)
+instance (ToJSON a) => ToJSON (Bind a)
+instance (ToJSON a) => ToJSON (Module a)
+
+
+
+
+
+
+
+
+
+
 (∋) :: DTerm -> DTerm -> TCM ()
 DType ∋ DType                    = pure ()
 DType ∋ (DΠ v vT bT)             = DType ∋ vT >> withVars [v := vT] (DType ∋ bT)
@@ -485,28 +502,8 @@ inferType (el :@: tm) = do DΠ v vT bT <- inferType el
                            eval $ bT `subst` [v :~> (tm ::: vT)]
 inferType (DRef n)    = lookupVar n >>= eval
 
-debug :: DElim
-debug = (Dλ "x" (D_ "x")) ::: (DΠ "x" DType (D_ "x"))
-
 main :: IO ()
 main = do
+  Right complete <- completeFile <#> A.parseEither parseModules
+  A.encode complete |> GZ.compress |> Base64.encode |> LBS.putStrLn
   pure ()
-
--- brokenKeys :: [Text]
--- brokenKeys = [ "Text.Parsing.StringParser"
---              , "Test.StrongCheck.Gen"
---              , "PscIde.Server"
---              , "Thermite"
---              , "Text.Parsing.Parser.Expr"
---              , "Text.Parsing.Parser.Language"
---              , "Text.Parsing.StringParser.Expr"
---              , "Test.QuickCheck.Gen" ]
---
--- brokens :: IO JSON
--- brokens = do
---   cf <- completeFile
---   pure (cf & _Object %~ LHM.filterWithKey (\k _ -> k `elem` brokenKeys))
---
--- genBrokenFile :: IO ()
--- genBrokenFile = let fp = "./data/broken.json.gz"
---                 in brokens >>= A.encode .> GZ.compress .> LBS.writeFile fp
