@@ -82,7 +82,7 @@ import           Types
 import           Utils
 
 backtrace :: Text -> (JSON -> JParse a) -> JSON -> JParse a
-backtrace msg f v = f v <|> fail (T.unpack msg)
+backtrace _msg f v = f v -- <|> fail (T.unpack msg)
 
 choice :: (Alternative f) => [f a] -> f a
 choice = asum
@@ -145,7 +145,7 @@ maybeToM :: (Monad m) => String -> Maybe a -> m a
 maybeToM err = maybe (fail err) pure
 
 parseTagList :: [(Text, JSON -> JParse a)] -> JSON -> JParse a
-parseTagList mapping = {- id -} backtrace "parseTagList"
+parseTagList mapping = backtrace "parseTagList"
                        $ \val -> do (k, v) <- helper val
                                     cb <- lookupM k
                                     cb v -- <|> failure3 k
@@ -168,7 +168,7 @@ parseIdent = backtrace "parseIdent"
              $ parseJSON .> fmap Ident
 
 parseBind :: (JSON -> a) -> JSON -> JParse (Bind a)
-parseBind cb = {- id -} backtrace "parseBind"
+parseBind cb = backtrace "parseBind"
                $ withObject "parseBind: not an object" (LHM.toList .> helper)
   where
     helper [(n, v)] = NonRec (cb Null) (Ident n) <$> parseExpr cb v
@@ -192,7 +192,7 @@ parseQualified p = backtrace "parseQualified"
     mkModName = moduleNameFromString . T.intercalate "."
 
 parseLiteral :: (JSON -> JParse a) -> JSON -> JParse (Literal a)
-parseLiteral cb = {- id -} backtrace "parseLiteral"
+parseLiteral cb = backtrace "parseLiteral"
                   $ parseTagList dispatch >=> (fmap cb .> sequenceA)
   where
     dispatch :: [(Text, JSON -> JParse (Literal JSON))]
@@ -251,54 +251,43 @@ parseCaseAlt cb = backtrace "parseCaseAlt"
     guardP (g, e) = (,) <$> parseExpr id g <*> parseExpr id e
 
 parseExpr :: (JSON -> a) -> JSON -> JParse (Expr a)
-parseExpr cb = {- id -} backtrace "parseExpr"
-               $ (parseTagList [ ("Literal",      litP)
-                               , ("Constructor",  ctorP)
-                               , ("Abs",          absP)
-                               , ("App",          appP)
-                               , ("Var",          varP)
-                               , ("Case",         caseP)
-                               , ("Let",          letP)
-                               , ("Accessor",     raP)
-                               , ("ObjectUpdate", ruP) ]
+parseExpr cb = backtrace "parseExpr"
+               $ (parseTagList [ ("Literal",      backtrace "litP"  litP)
+                               , ("Constructor",  backtrace "ctorP" ctorP)
+                               , ("Abs",          backtrace "absP"  absP)
+                               , ("App",          backtrace "appP"  appP)
+                               , ("Var",          backtrace "varP"  varP)
+                               , ("Case",         backtrace "caseP" caseP)
+                               , ("Let",          backtrace "letP"  letP)
+                               , ("Accessor",     backtrace "raP"   raP)
+                               , ("ObjectUpdate", backtrace "ruP"   ruP) ]
                   .> fmap (fmap cb))
   where
     exprP, litP, varP, ctorP, absP, appP, caseP, letP, raP, ruP
       :: JSON -> JParse (Expr JSON)
     exprP = parseExpr id
-    litP  = backtrace "litP" $
-            parseLiteral exprP .> fmap (Lit Null)
-    varP  = backtrace "varP" $
-            parseQualified (Ident .> pure) .> fmap (Var Null)
-    ctorP = backtrace "ctorP" $
-            wrapP $ \(t, n, as) -> Ctor Null
+    litP  = parseLiteral exprP .> fmap (Lit Null)
+    varP  = parseQualified (Ident .> pure) .> fmap (Var Null)
+    ctorP = wrapP $ \(t, n, as) -> Ctor Null
                                    <$> parseProperName t
                                    <*> parseProperName n
                                    <*> (parseJSON as >>= mapM parseIdent)
-    absP  = backtrace "absP" $
-            wrapP $ \(n, b)     -> Abs Null <$> parseIdent n <*> exprP b
-    appP  = backtrace "appP" $
-            wrapP $ \(f, x)     -> App Null <$> exprP f <*> exprP x
-    caseP = backtrace "caseP" $
-            wrapP $ \(vs, as)   -> Case Null
+    absP  = wrapP $ \(n, b)     -> Abs Null <$> parseIdent n <*> exprP b
+    appP  = wrapP $ \(f, x)     -> App Null <$> exprP f <*> exprP x
+    caseP = wrapP $ \(vs, as)   -> Case Null
                                    <$> arrayP vs exprP
                                    <*> arrayP as (parseCaseAlt id)
-    letP  = backtrace "letP" $
-            wrapP $ \(bs, e)    -> backtrace (T.pack ("letP: \n" <> show bs <> "\n\n" <> show e))
-                                   (\x ->  Let Null
-                                           <$> arrayP bs (parseBind id)
-                                           <*> exprP e)
-                                   Null
-    raP   = backtrace "raP" $
-            wrapP $ \(f, r)     -> RecAccess Null
+    letP  = wrapP $ \(bs, e)    -> Let Null
+                                   <$> arrayP bs (parseBind id)
+                                   <*> exprP e
+    raP   = wrapP $ \(f, r)     -> RecAccess Null
                                    <$> parseJSON f
                                    <*> exprP r
-    ruP   = backtrace "ruP" $
-            wrapP $ \(r, fs)    -> backtrace (T.pack ("ruP: \n" <> show r <> "\n\n" <> show fs))
-                                   (\x ->  RecUpdate Null
-                                           <$> exprP r
-                                           <*> wrapP (LHM.toList .> mapM (second exprP .> sequenceA)) fs)
-                                   Null
+    ruP   = wrapP $ \(r, fs)    -> RecUpdate Null
+                                   <$> exprP r
+                                   <*> wrapP (tl .> mapM fieldP) fs
+    tl = LHM.toList
+    fieldP = second exprP .> sequenceA
     arrayP :: (FromJSON a) => JSON -> (a -> JParse b) -> JParse [b]
     arrayP v f = wrapP (mapM f) v
 
@@ -404,8 +393,8 @@ data Module a
 
 parseModule :: (ModuleName, JSON) -> JParse (Version, Module JSON)
 parseModule (name, v) = (,)
-                        <$> {- backtrace "versionP" -} versionP v
-                        <*> {- backtrace "moduleP"  -} moduleP  v
+                        <$> backtrace "versionP" versionP v
+                        <*> backtrace "moduleP"  moduleP  v
   where
     versionP (Object o) = do String s <- o .: "builtWith"
                              let readVersion = runReadP parseVersion
