@@ -65,8 +65,10 @@ import qualified Data.Map.Strict                   as Map
 
 import qualified Data.HashMap.Lazy                 as LHM
 
-import           Data.Aeson                        as A
--- import qualified Data.Aeson.BetterErrors           as A
+import           Data.Aeson
+                 (FromJSON (..), ToJSON (..), Value (..), (.:))
+import qualified Data.Aeson                        as A
+import qualified Data.Aeson.BetterErrors           as ABE
 import qualified Data.Aeson.Encode.Pretty          as A
 import qualified Data.Aeson.Types                  as A
 
@@ -84,6 +86,13 @@ import           Language.PureScript.Names
 import           Evaluable
 import           Types
 import           Utils
+
+data CustomJSONError = CustomJSONError Text
+                     deriving (Eq, Show)
+
+type JParse a = A.Parser a
+-- type JParse a = ABE.Parse CustomJSONError a
+type JSON = Value
 
 type AnnParser a = JSON -> JParse (a, JSON)
 
@@ -109,7 +118,7 @@ newAnnP :: HCS => AnnParser [JSON]
 newAnnP (Object o) = do ann <- o .: "ann"
                         val <- o .: "val"
                         pure ([ann], val)
--- newAnnP _          = empty
+newAnnP _          = empty
 
 runInsideAP :: HCS => AnnParser a -> (a -> JSON -> JParse b) -> JSON -> JParse b
 runInsideAP annP cb v = annP v >>= uncurry cb
@@ -140,9 +149,6 @@ instance Traversable Literal where
       helper (BooleanLiteral b) = pure $ BooleanLiteral b
       helper (ArrayLiteral  xs) = ArrayLiteral  <$> sequenceA xs
       helper (ObjectLiteral ps) = ObjectLiteral <$> sequenceA (map sequenceA ps)
-
-type JParse a = A.Parser a
-type JSON = Value
 
 class (Functor f) => Annotated f where
   extractAnn :: HCS => f a -> a
@@ -205,7 +211,7 @@ parseIdent = backtrace "parseIdent"
 
 parseBind :: forall ann. HCS => AnnParser ann -> JSON -> JParse (Bind ann)
 parseBind annP = backtrace "parseBind"
-                 $ withObject "parseBind: not an object" (LHM.toList .> helper)
+                 $ A.withObject "parseBind: not an object" (LHM.toList .> helper)
   where
     helper [(n, v)] = runInsideAP' annP v
                       $ \a -> parseExpr annP >=> NonRec a (Ident n) .> pure
@@ -284,7 +290,7 @@ parseCaseAlt annP = backtrace "parseCaseAlt"
                                             <*> resultP vr
   where
     bindersP :: JSON -> JParse [Binder ann]
-    bindersP = withArray "parseCaseAlt: bindersP: not an array"
+    bindersP = A.withArray "parseCaseAlt: bindersP: not an array"
                (V.mapM (parseBinder annP) .> fmap V.toList)
     resultP :: JSON -> JParse (Either [(Guard ann, Expr ann)] (Expr ann))
     resultP v = [ Left  <$> (parseJSON v >>= mapM guardP)
