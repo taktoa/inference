@@ -1,3 +1,4 @@
+{-# LANGUAGE ConstraintKinds       #-}
 {-# LANGUAGE DataKinds             #-}
 {-# LANGUAGE DeriveFoldable        #-}
 {-# LANGUAGE DeriveFunctor         #-}
@@ -34,7 +35,9 @@ import           Data.Maybe
 import           Data.Semigroup
 
 import           Data.Kind
+import           GHC.Exts                          (IsList (..))
 import           GHC.Generics                      (Generic)
+import qualified GHC.Stack                         as Stack
 import           GHC.TypeLits
 
 import           Data.List                         (maximumBy, sortBy)
@@ -82,13 +85,45 @@ import           Evaluable
 import           Types
 import           Utils
 
-backtrace :: Text -> (JSON -> JParse a) -> JSON -> JParse a
-backtrace _msg f v = f v -- <|> fail (T.unpack msg)
+type AnnParser a = JSON -> JParse (a, JSON)
 
-choice :: (Alternative f) => [f a] -> f a
+type HCS = Stack.HasCallStack
+type StrLike str = (Monoid str, IsList str, Item str ~ Char)
+
+failure :: forall str m a. (HCS, StrLike str, Monad m)
+        => [str] -> m a
+failure xs = [ stackTrace
+             , "\n\n"
+             , toList $ mconcat xs
+             ] |> mconcat |> fail
+  where
+    stackTrace = Stack.prettyCallStack Stack.callStack
+
+failureT :: (Monad m) => [Text] -> m a
+failureT = failure
+
+defAnnP :: HCS => AnnParser ()
+defAnnP v = pure ((), v)
+
+newAnnP :: HCS => AnnParser [JSON]
+newAnnP (Object o) = do ann <- o .: "ann"
+                        val <- o .: "val"
+                        pure ([ann], val)
+-- newAnnP _          = empty
+
+runInsideAP :: HCS => AnnParser a -> (a -> JSON -> JParse b) -> JSON -> JParse b
+runInsideAP annP cb v = annP v >>= uncurry cb
+
+runInsideAP' :: HCS => AnnParser a -> JSON -> (a -> JSON -> JParse b) -> JParse b
+runInsideAP' annP v cb = annP v >>= uncurry cb
+
+backtrace :: HCS => Text -> (JSON -> JParse a) -> JSON -> JParse a
+backtrace msg f v = f v -- <|> failure [msg]
+
+choice :: HCS => (Alternative f) => [f a] -> f a
 choice = asum
 
-wrapP :: (FromJSON a) => (a -> JParse b) -> JSON -> JParse b
+wrapP :: HCS => (FromJSON a) => (a -> JParse b) -> JSON -> JParse b
 wrapP f v = parseJSON v >>= f
 
 instance Foldable Literal where
@@ -110,8 +145,8 @@ type JParse a = A.Parser a
 type JSON = Value
 
 class (Functor f) => Annotated f where
-  extractAnn :: f a -> a
-  modifyAnn  :: (a -> a) -> f a -> f a
+  extractAnn :: HCS => f a -> a
+  modifyAnn  :: HCS => (a -> a) -> f a -> f a
 
 type PName  (a :: ProperNameType) = ProperName a
 type QPName (a :: ProperNameType) = Qualified (ProperName a)
@@ -121,14 +156,14 @@ type Comment    = PS.Comment
 
 type Ann = (Maybe SourceSpan, [Comment], Maybe PS.Type, Maybe Meta)
 
-nullAnn :: Ann
+nullAnn :: HCS => Ann
 nullAnn = (Nothing, [], Nothing, Nothing)
 
-removeComments :: Ann -> Ann
+removeComments :: HCS => Ann -> Ann
 removeComments (mss, _, mt, mm) = (mss, [], mt, mm)
 
 data Binder a
-  = NullBinder    { _binderAnn      :: a }
+  = NullBinder    { _binderAnn :: a }
   | LiteralBinder { _binderAnn     :: a
                   , _binderLiteral :: Literal (Binder a) }
   | VarBinder     { _binderAnn   :: a
@@ -142,10 +177,10 @@ data Binder a
                   , _binderBinder :: Binder a }
   deriving (Show, Functor, Foldable, Traversable, Generic)
 
-maybeToM :: (Monad m) => String -> Maybe a -> m a
-maybeToM err = maybe (fail err) pure
+maybeToM :: HCS => (Monad m) => String -> Maybe a -> m a
+maybeToM err = maybe (failure [err]) pure
 
-parseTagList :: [(Text, JSON -> JParse a)] -> JSON -> JParse a
+parseTagList :: HCS => [(Text, JSON -> JParse a)] -> JSON -> JParse a
 parseTagList m = backtrace "parseTagList"
                  $ \val -> do (k, v) <- helper val
                               cb <- lookupM k
@@ -156,140 +191,150 @@ parseTagList m = backtrace "parseTagList"
     helper (Array (uncons -> Just (String k, [v]))) = pure (k, v)
     helper (Array (uncons -> Just (String k, v)))   = pure (k, Array v)
     helper owise                                    = failure2 owise
-    failure1 x = fail $ "parseTagList: failed to look up key: " <> show x
-    failure2 x = fail $ "parseTagList: error code 2: "          <> show x
-    failure3 x = fail $ "parseTagList: callback failed for "    <> show x
+    failure1 x = failure [ "parseTagList: failed to look up key: ", show x ]
+    failure2 x = failure [ "parseTagList: error code 2: ",          show x ]
+    failure3 x = failure [ "parseTagList: callback failed for ",    show x ]
 
-parseModuleName :: JSON -> JParse ModuleName
+parseModuleName :: HCS => JSON -> JParse ModuleName
 parseModuleName = backtrace "parseModuleName"
                   $ parseJSON .> fmap moduleNameFromString
 
-parseIdent :: JSON -> JParse Ident
+parseIdent :: HCS => JSON -> JParse Ident
 parseIdent = backtrace "parseIdent"
              $ parseJSON .> fmap Ident
 
-parseBind :: (JSON -> a) -> JSON -> JParse (Bind a)
-parseBind cb = backtrace "parseBind"
-               $ withObject "parseBind: not an object" (LHM.toList .> helper)
+parseBind :: forall ann. HCS => AnnParser ann -> JSON -> JParse (Bind ann)
+parseBind annP = backtrace "parseBind"
+                 $ withObject "parseBind: not an object" (LHM.toList .> helper)
   where
-    helper [(n, v)] = NonRec (cb Null) (Ident n) <$> parseExpr cb v
-    helper xs       = Rec (cb Null) <$> mapM mkRecBinding xs
-    mkRecBinding (k, v) = (\e -> ((cb Null, Ident k), e)) <$> parseExpr cb v
+    helper [(n, v)] = runInsideAP' annP v
+                      $ \a -> parseExpr annP >=> NonRec a (Ident n) .> pure
+    helper xs       = Rec <$> mapM mkRecBinding xs
+    mkRecBinding :: (Text, JSON) -> JParse ((ann, Ident), Expr ann)
+    mkRecBinding (k, v) = runInsideAP' annP v
+                          $ \a -> parseExpr annP
+                                  >=> (\e -> pure ((a, Ident k), e))
 
-parseProperName :: JSON -> JParse (ProperName a)
+parseProperName :: HCS => JSON -> JParse (ProperName a)
 parseProperName = backtrace "parseProperName" (parseJSON .> fmap ProperName)
 
-parseQualified :: forall a. (Text -> JParse a) -> JSON -> JParse (Qualified a)
-parseQualified p = backtrace "parseQualified"
-                   $ withText "parseQualified: not a string"
-                   $ \s -> qualifiedP s <|> unqualifiedP s
+parseQualified :: forall a. HCS => (Text -> JParse a) -> JSON -> JParse (Qualified a)
+parseQualified p = backtrace "parseQualified" go
   where
+    go :: JSON -> JParse (Qualified a)
+    go (String s) = qualifiedP s <|> unqualifiedP s
+    go owise      = failure ["parseQualified: not a string: ", show owise]
     qualifiedP, unqualifiedP :: Text -> JParse (Qualified a)
     qualifiedP s = case unsnoc $ T.split (== '.') s
                    of Just (xs, x) -> let mn = mkModName xs
                                       in Qualified (Just mn) <$> p x
-                      Nothing      -> fail "parseQualified: no instance of '.'"
+                      Nothing      -> failureT
+                                      ["parseQualified: no instance of '.'"]
     unqualifiedP s = Qualified Nothing <$> p s
     mkModName = moduleNameFromString . T.intercalate "."
 
-parseLiteral :: (JSON -> JParse a) -> JSON -> JParse (Literal a)
+parseLiteral :: HCS => (JSON -> JParse a) -> JSON -> JParse (Literal a)
 parseLiteral cb = backtrace "parseLiteral"
-                  $ parseTagList dispatch >=> (fmap cb .> sequenceA)
+                  $ parseTagList dispatch >=> fmap cb .> sequenceA
   where
-    dispatch :: [(Text, JSON -> JParse (Literal JSON))]
-    dispatch = [ ("IntLiteral",     go (Left  .> NumericLiteral))
-               , ("NumberLiteral",  go (Right .> NumericLiteral))
-               , ("StringLiteral",  go StringLiteral)
-               , ("CharLiteral",    go CharLiteral)
-               , ("BooleanLiteral", go BooleanLiteral)
-               , ("ArrayLiteral",   go ArrayLiteral)
-               , ("ObjectLiteral",  go (LHM.toList .> ObjectLiteral)) ]
-    go :: (FromJSON a) => (a -> Literal JSON) -> JSON -> JParse (Literal JSON)
-    go f = parseJSON .> fmap f
+    dispatch :: HCS => [(Text, JSON -> JParse (Literal JSON))]
+    dispatch = let go f = parseJSON .> fmap f
+               in [ ("IntLiteral",     go (Left  .> NumericLiteral))
+                  , ("NumberLiteral",  go (Right .> NumericLiteral))
+                  , ("StringLiteral",  go StringLiteral)
+                  , ("CharLiteral",    go CharLiteral)
+                  , ("BooleanLiteral", go BooleanLiteral)
+                  , ("ArrayLiteral",   go ArrayLiteral)
+                  , ("ObjectLiteral",  go (LHM.toList .> ObjectLiteral)) ]
 
-parseBinder :: (JSON -> a) -> JSON -> JParse (Binder a)
-parseBinder cb = backtrace "parseBinder"
-                 (parseTagList [ ("NullBinder",        nullP)
-                               , ("LiteralBinder",     litP)
-                               , ("VarBinder",         varP)
-                               , ("ConstructorBinder", ctorP)
-                               , ("NamedBinder",       namedP) ]
-                  .> fmap (fmap cb))
+parseBinder :: forall ann. HCS => AnnParser ann -> JSON -> JParse (Binder ann)
+parseBinder annP = backtrace "parseBinder"
+                   $ runInsideAP annP
+                   $ \a -> parseTagList [ ("NullBinder",        nullP  a)
+                                        , ("LiteralBinder",     litP   a)
+                                        , ("VarBinder",         varP   a)
+                                        , ("ConstructorBinder", ctorP  a)
+                                        , ("NamedBinder",       namedP a) ]
   where
-    nullP, litP, varP, ctorP, namedP :: JSON -> JParse (Binder JSON)
-    nullP    = pure . NullBinder
-    litP     = parseLiteral (parseBinder id) .> fmap (LiteralBinder Null)
-    varP     = wrapP $ \x             -> VarBinder Null <$> parseIdent x
-    ctorP    = wrapP $ \(vt, vn, vbs) -> CtorBinder Null
-                                         <$> parseQPName vt
-                                         <*> parseQPName vn
-                                         <*> parseBinderList id vbs
-    namedP   = wrapP $ \(vi, vb)      -> NamedBinder Null
-                                         <$> parseIdent vi
-                                         <*> parseBinder id vb
+    nullP, litP, varP, ctorP, namedP :: ann -> JSON -> JParse (Binder ann)
+    nullP   a = const $ pure $ NullBinder a
+    litP    a = parseLiteral binderP .> fmap (LiteralBinder a)
+    varP    a = wrapP $ \x             -> VarBinder a <$> parseIdent x
+    ctorP   a = wrapP $ \(vt, vn, vbs) -> CtorBinder a
+                                          <$> parseQPName vt
+                                          <*> parseQPName vn
+                                          <*> parseBinderList vbs
+    namedP  a = wrapP $ \(vi, vb)      -> NamedBinder a
+                                          <$> parseIdent vi
+                                          <*> binderP vb
 
-    parseBinderList :: (JSON -> a) -> JSON -> JParse [Binder a]
-    parseBinderList f = parseJSON >=> mapM (parseBinder f)
+    binderP :: JSON -> JParse (Binder ann)
+    binderP = parseBinder annP
 
-    parseQPName :: JSON -> JParse (QPName a)
+    parseBinderList :: JSON -> JParse [Binder ann]
+    parseBinderList = parseJSON >=> mapM binderP
+
+    parseQPName :: JSON -> JParse (QPName x)
     parseQPName = parseQualified (ProperName .> pure)
 
-parseCaseAlt :: (JSON -> a) -> JSON -> JParse (CaseAlternative a)
-parseCaseAlt cb = backtrace "parseCaseAlt"
-                  ((wrapP $ \(vbs, vr) -> CaseAlternative
-                                          <$> bindersP vbs
-                                          <*> resultP vr)
-                   .> fmap (fmap cb))
+parseCaseAlt :: forall ann. HCS => AnnParser ann -> JSON -> JParse (CaseAlternative ann)
+parseCaseAlt annP = backtrace "parseCaseAlt"
+                    $ wrapP $ \(vbs, vr) -> CaseAlternative
+                                            <$> bindersP vbs
+                                            <*> resultP vr
   where
-    bindersP :: JSON -> JParse [Binder JSON]
+    bindersP :: JSON -> JParse [Binder ann]
     bindersP = withArray "parseCaseAlt: bindersP: not an array"
-               (V.mapM (parseBinder id) .> fmap V.toList)
-    resultP :: JSON -> JParse (Either [(Guard JSON, Expr JSON)] (Expr JSON))
+               (V.mapM (parseBinder annP) .> fmap V.toList)
+    resultP :: JSON -> JParse (Either [(Guard ann, Expr ann)] (Expr ann))
     resultP v = [ Left  <$> (parseJSON v >>= mapM guardP)
-                , Right <$> parseExpr id v
+                , Right <$> parseExpr annP v
                 ] |> choice
-    guardP :: (JSON, JSON) -> JParse (Guard JSON, Expr JSON)
-    guardP (g, e) = (,) <$> parseExpr id g <*> parseExpr id e
+    guardP :: (JSON, JSON) -> JParse (Guard ann, Expr ann)
+    guardP (g, e) = (,) <$> parseExpr annP g <*> parseExpr annP e
 
-parseExpr :: (JSON -> a) -> JSON -> JParse (Expr a)
+parseExpr :: forall ann. HCS => AnnParser ann -> JSON -> JParse (Expr ann)
 parseExpr cb = backtrace "parseExpr"
-               $ (parseTagList [ ("Literal",      backtrace "litP"  litP)
-                               , ("Constructor",  backtrace "ctorP" ctorP)
-                               , ("Abs",          backtrace "absP"  absP)
-                               , ("App",          backtrace "appP"  appP)
-                               , ("Var",          backtrace "varP"  varP)
-                               , ("Case",         backtrace "caseP" caseP)
-                               , ("Let",          backtrace "letP"  letP)
-                               , ("Accessor",     backtrace "raP"   raP)
-                               , ("ObjectUpdate", backtrace "ruP"   ruP) ]
-                  .> fmap (fmap cb))
+               $ runInsideAP cb
+               $ \a -> parseTagList
+                       [ ("Literal",      backtrace "litP"  $ litP  a)
+                       , ("Constructor",  backtrace "ctorP" $ ctorP a)
+                       , ("Abs",          backtrace "absP"  $ absP  a)
+                       , ("App",          backtrace "appP"  $ appP  a)
+                       , ("Var",          backtrace "varP"  $ varP  a)
+                       , ("Case",         backtrace "caseP" $ caseP a)
+                       , ("Let",          backtrace "letP"  $ letP  a)
+                       , ("Accessor",     backtrace "raP"   $ raP   a)
+                       , ("ObjectUpdate", backtrace "ruP"   $ ruP   a) ]
   where
-    exprP, litP, varP, ctorP, absP, appP, caseP, letP, raP, ruP
-      :: JSON -> JParse (Expr JSON)
-    exprP = parseExpr id
-    litP  = parseLiteral exprP .> fmap (Lit Null)
-    varP  = parseQualified (Ident .> pure) .> fmap (Var Null)
-    ctorP = wrapP $ \(t, n, as) -> Ctor Null
-                                   <$> parseProperName t
-                                   <*> parseProperName n
-                                   <*> (parseJSON as >>= mapM parseIdent)
-    absP  = wrapP $ \(n, b)     -> Abs Null <$> parseIdent n <*> exprP b
-    appP  = wrapP $ \(f, x)     -> App Null <$> exprP f <*> exprP x
-    caseP = wrapP $ \(vs, as)   -> Case Null
-                                   <$> arrayP vs exprP
-                                   <*> arrayP as (parseCaseAlt id)
-    letP  = wrapP $ \(bs, e)    -> Let Null
-                                   <$> arrayP bs (parseBind id)
-                                   <*> exprP e
-    raP   = wrapP $ \(f, r)     -> RecAccess Null
-                                   <$> parseJSON f
-                                   <*> exprP r
-    ruP   = wrapP $ \(r, fs)    -> RecUpdate Null
-                                   <$> exprP r
-                                   <*> wrapP (tl .> mapM fieldP) fs
+    litP, varP, ctorP, absP, appP, caseP, letP, raP, ruP
+      :: HCS => ann -> JSON -> JParse (Expr ann)
+    litP  a = parseLiteral exprP .> fmap (Lit a)
+    varP  a = parseQualified (Ident .> pure) .> fmap (Var a)
+    ctorP a = wrapP $ \(t, n, as) -> Ctor a
+                                     <$> parseProperName t
+                                     <*> parseProperName n
+                                     <*> (parseJSON as >>= mapM parseIdent)
+    absP  a = wrapP $ \(n, b)     -> Abs a <$> parseIdent n <*> exprP b
+    appP  a = wrapP $ \(f, x)     -> App a <$> exprP f <*> exprP x
+    caseP a = wrapP $ \(vs, as)   -> Case a
+                                     <$> arrayP vs exprP
+                                     <*> arrayP as (parseCaseAlt cb)
+    letP  a = wrapP $ \(bs, e)    -> Let a
+                                     <$> arrayP bs (parseBind cb)
+                                     <*> exprP e
+    raP   a = wrapP $ \(f, r)     -> RecAccess a
+                                     <$> parseJSON f
+                                     <*> exprP r
+    ruP   a = wrapP $ \(r, fs)    -> RecUpdate a
+                                     <$> exprP r
+                                     <*> wrapP (tl .> mapM fieldP) fs
     tl = LHM.toList
+    exprP :: HCS => JSON -> JParse (Expr ann)
+    exprP = parseExpr cb
+    fieldP :: HCS => (Text, JSON) -> JParse (Text, Expr ann)
     fieldP = second exprP .> sequenceA
-    arrayP :: (FromJSON a) => JSON -> (a -> JParse b) -> JParse [b]
+    arrayP :: HCS => (FromJSON a) => JSON -> (a -> JParse b) -> JParse [b]
     arrayP v f = wrapP (mapM f) v
 
 instance Annotated Binder where
@@ -333,13 +378,12 @@ data Bind a
   = NonRec { _bindAnn  :: a
            , _bindName :: Ident
            , _bindVal  :: Expr a }
-  | Rec    { _bindAnn    :: a
-           , _bindGroups :: [((a, Ident), Expr a)] }
+  | Rec    { _bindGroups :: [((a, Ident), Expr a)] }
   deriving (Show, Functor, Foldable, Traversable, Generic)
 
-instance Annotated Bind where
-  extractAnn = _bindAnn
-  modifyAnn f b = b { _bindAnn = f $ _bindAnn b }
+-- instance Annotated Bind where
+--   extractAnn = _bindAnn
+--   modifyAnn f b = b { _bindAnn = f $ _bindAnn b }
 
 type Guard a = Expr a
 
@@ -392,60 +436,69 @@ data Module a
     , _moduleDecls    :: [Bind a] }
   deriving (Show, Generic)
 
-parseModule :: (ModuleName, JSON) -> JParse (Version, Module JSON)
-parseModule (name, v) = (,)
-                        <$> backtrace "versionP" versionP v
-                        <*> backtrace "moduleP"  moduleP  v
+parseModule :: HCS => AnnParser a -> (ModuleName, JSON) -> JParse (Version, Module a)
+parseModule annP (name, v) = (,)
+                             <$> backtrace "versionP" versionP v
+                             <*> backtrace "moduleP"  moduleP  v
   where
     versionP (Object o) = do String s <- o .: "builtWith"
-                             let readVersion = runReadP parseVersion
-                             either fail pure $ readVersion $ T.unpack s
-    versionP _          = fail "versionP: not an object"
+                             either (T.pack .> pure .> failureT) pure
+                               $ runReadP parseVersion $ T.unpack s
+    versionP _          = failureT ["versionP: not an object"]
     moduleP (Object o) = Module
-                         <$> pure []
+                         <$> (((o .: "comments") >>= mapM parseComment)
+                              <|> pure [])
                          <*> pure name
-                         <*> ((o .: "imports") >>= mapM parseImport)
-                         <*> ((o .: "exports") >>= mapM parseIdent)
-                         <*> ((o .: "foreign") >>= mapM parseIdent)
-                         <*> ((o .: "decls")   >>= mapM (parseBind id))
-    moduleP _          = fail "moduleP: not an object"
-    parseImport = parseModuleName .> fmap (\mn -> (Null, mn))
+                         <*> ((o .: "imports")  >>= mapM parseImport)
+                         <*> ((o .: "exports")  >>= mapM parseIdent)
+                         <*> ((o .: "foreign")  >>= mapM parseIdent)
+                         <*> ((o .: "decls")    >>= mapM (parseBind annP))
+    moduleP _          = failureT ["moduleP: not an object"]
+    parseComment :: HCS => JSON -> JParse Comment
+    parseComment (Array [String "Line",  String t]) = pure $ PS.LineComment  t
+    parseComment (Array [String "Block", String t]) = pure $ PS.BlockComment t
+    parseComment _                                  = empty
+    parseImport = runInsideAP annP
+                  $ \a -> parseModuleName .> fmap (\mn -> (a, mn))
 
-parseModules :: JSON -> JParse [(Version, Module JSON)]
-parseModules = parseJSON
-               >=>
-               LHM.toList .> mapM (first moduleNameFromString .> parseModule)
+parseModules :: HCS => AnnParser ann -> JSON -> JParse [(Version, Module ann)]
+parseModules annP = parseJSON >=> LHM.toList .> mapM parsePair
+  where
+    parsePair = first moduleNameFromString .> parseModule annP
 
-moduleParse :: Text -> JSON -> Either String (Version, Module JSON)
-moduleParse mn = A.parseEither (curry parseModule (moduleNameFromString mn))
+moduleParse :: HCS => AnnParser ann -> Text -> JSON
+            -> Either String (Version, Module ann)
+moduleParse annP mn = A.parseEither
+                      (curry (parseModule annP) (moduleNameFromString mn))
 
-newtype TopLevel = TopLevel [(Version, Module JSON)]
-                 deriving (Show)
+-- newtype TopLevel = TopLevel [(Version, Module JSON)]
+--                  deriving (Show)
+--
+-- instance FromJSON TopLevel where
+--   parseJSON v = TopLevel <$> parseModules annP v
 
-instance FromJSON TopLevel where
-  parseJSON v = TopLevel <$> parseModules v
-
-readGZ :: FilePath -> IO LBS.ByteString
+readGZ :: HCS => FilePath -> IO LBS.ByteString
 readGZ = LBS.readFile .> fmap GZ.decompress
 
-readJSON :: (FromJSON a) => LBS.ByteString -> IO a
-readJSON = A.eitherDecode .> either fail pure
+readJSON :: HCS => (FromJSON a) => LBS.ByteString -> IO a
+readJSON = A.eitherDecode .> either (T.pack .> pure .> failureT) pure
 
-simpleFile, bigFile, completeFile :: IO JSON
+simpleFile, bigFile, completeFile, fullFile :: HCS => IO JSON
 simpleFile   = readGZ "./data/simple.json.gz"   >>= readJSON
 bigFile      = readGZ "./data/big.json.gz"      >>= readJSON
 completeFile = readGZ "./data/complete.json.gz" >>= readJSON
+fullFile     = readGZ "./data/full.json.gz"     >>= readJSON
 
-maybeIO :: Maybe a -> IO a
-maybeIO = maybe (fail "maybeIO") pure
+maybeIO :: HCS => Maybe a -> IO a
+maybeIO = maybe (failureT ["maybeIO"]) pure
 
-eitherIO' :: (e -> String) -> Either e a -> IO a
-eitherIO' f = either (f .> fail) pure
+eitherIO' :: HCS => (e -> String) -> Either e a -> IO a
+eitherIO' f = either (f .> T.pack .> pure .> failureT) pure
 
-eitherIO :: (Show s) => Either s a -> IO a
+eitherIO :: HCS => (Show s) => Either s a -> IO a
 eitherIO = eitherIO' show
 
-printMap :: (Show s) => [(Text, s)] -> IO ()
+printMap :: HCS => (Show s) => [(Text, s)] -> IO ()
 printMap ps = do
   let longest = ps |> map (fst .> T.length) |> maximum
   let pad t = t <> T.replicate (longest - T.length t) " "
@@ -456,14 +509,14 @@ printMap ps = do
                               , color 33 $ T.pack (show size)
                               ] |> mconcat |> T.putStrLn
 
-computeSizes :: JSON -> [(Text, Int)]
+computeSizes :: HCS => JSON -> [(Text, Int)]
 computeSizes (Object obj) = obj
                             |> LHM.map jsonSize
                             |> LHM.toList
                             |> sortBy (comparing snd)
 computeSizes _            = []
 
-jsonSize :: JSON -> Int
+jsonSize :: HCS => JSON -> Int
 jsonSize (Object o) = o |> LHM.toList |> fmap (snd .> jsonSize) |> sum
 jsonSize (Array  v) = v |> V.map jsonSize |> V.sum
 jsonSize _          = 1
@@ -485,7 +538,7 @@ instance (ToJSON a) => ToJSON (Module a)
 
 
 
-(∋) :: DTerm -> DTerm -> TCM ()
+(∋) :: HCS => DTerm -> DTerm -> TCM ()
 DType ∋ DType                    = pure ()
 DType ∋ (DΠ v vT bT)             = DType ∋ vT >> withVars [v := vT] (DType ∋ bT)
 (DΠ v vT bT) ∋ (Dλ n b) | v == n = withVars [v := vT] (b ∋ bT)
@@ -495,15 +548,15 @@ ty ∋ (D_ e)                      = do inferred <- inferType e
                                         $ throwTypeSynthesisError ty (D_ e)
 ty ∋ tm                          = throwTypeSynthesisError ty tm
 
-inferType :: DElim -> TCM DTerm
+inferType :: HCS => DElim -> TCM DTerm
 inferType (tm ::: ty) = DType ∋ ty >> ty ∋ tm >> eval ty
 inferType (el :@: tm) = do DΠ v vT bT <- inferType el
                            vT ∋ tm
                            eval $ bT `subst` [v :~> (tm ::: vT)]
 inferType (DRef n)    = lookupVar n >>= eval
 
-main :: IO ()
+main :: HCS => IO ()
 main = do
-  Right complete <- completeFile <#> A.parseEither parseModules
+  Right complete <- completeFile <#> A.parseEither (parseModules defAnnP)
   A.encode complete |> GZ.compress |> Base64.encode |> LBS.putStrLn
   pure ()
