@@ -19,37 +19,44 @@ module Main where
 import           Control.Applicative
 import           Control.Monad.Identity
 import           Control.Monad.State.Strict
-import           Data.Hashable              (Hashable)
+
+import           Data.Monoid
+
 import           Data.HashMap.Strict        (HashMap)
 import qualified Data.HashMap.Strict        as Map
+
 import           Data.HashSet               (HashSet)
 import qualified Data.HashSet               as Set
-import           Data.Monoid
-import           Data.String
+
+import           Data.Text                  (Text)
+import qualified Data.Text                  as T
+
+import           Data.Hashable              (Hashable)
+import           Data.String                (IsString (..))
 import           GHC.Generics               (Generic)
 
 import           Control.Concurrent.Supply
 
-import qualified Debug.Trace                as Tr
-
 import           Helpers
 import           Supply
 
-newtype Name = Name String
-             deriving (Eq, Show, Read, Generic)
+newtype Name
+  = MkName Text
+  deriving (Eq, Show, Read, Generic)
 
 instance IsString Name where
-  fromString = Name
+  fromString = T.pack .> MkName
 
-data DTerm = DStar
-           | DConst String
-           | D_ DElim
-           | DΠ Name DTerm DTerm
-           | Dλ Name DTerm
-           deriving (Eq, Show, Read, Generic)
+data DTerm
+  = DStar
+  | DConst !Text
+  | D_ DElim
+  | DΠ Name DTerm DTerm
+  | Dλ Name DTerm
+  deriving (Eq, Show, Read, Generic)
 
 instance IsString DTerm where
-  fromString = DConst
+  fromString = T.pack .> DConst
 
 data DElim = DTerm ::: DTerm
            | DElim :@: DTerm
@@ -95,18 +102,21 @@ data Replace = Name :~> DElim
 --   (elX :@: tmX) == (elY :@: tmY) = (elX == elY) && (tmX == tmY)
 --   (DRef nX)     == (DRef nY)     = (nX == nY)
 
-prettyEl :: DElim -> String
-prettyEl (DRef (Name x)) = x
-prettyEl (tm ::: ty)     = "(" <> pretty tm <> " ∷ " <> pretty ty <> ")"
-prettyEl (el :@: tm)     = prettyEl el <> " " <> pretty tm
+prettyN :: Name -> Text
+prettyN (MkName n) = n
 
-pretty :: DTerm -> String
-pretty DStar               = "⋆"
-pretty (DConst c)          = "c⟨" <> c <> "⟩"
-pretty (D_ el)             = "⟦" <> prettyEl el <> "⟧"
-pretty (DΠ (Name v) vT bT) = "(Π⟨" <> v <> " : " <> pretty vT <> "⟩"
-                             <> " " <> pretty bT <> ")"
-pretty (Dλ (Name v) b)     = "(λ" <> v <> " → " <> pretty b <> ")"
+prettyEl :: DElim -> Text
+prettyEl (DRef n)    = prettyN n
+prettyEl (tm ::: ty) = "(" <> pretty tm <> " ∷ " <> pretty ty <> ")"
+prettyEl (el :@: tm) = prettyEl el <> " " <> pretty tm
+
+pretty :: DTerm -> Text
+pretty DStar        = "⋆"
+pretty (DConst c)   = "c⟨" <> c <> "⟩"
+pretty (D_ el)      = "⟦" <> prettyEl el <> "⟧"
+pretty (DΠ v vT bT) = "(Π⟨" <> prettyN v <> " : " <> pretty vT <> "⟩"
+                      <> " " <> pretty bT <> ")"
+pretty (Dλ v b)     = "(λ" <> prettyN v <> " → " <> pretty b <> ")"
 
 subst :: DTerm -> [Replace] -> DTerm
 subst term []                      = term
@@ -134,16 +144,16 @@ tell s = modify (<> s)
 with :: [(Name, DTerm)] -> TCM a -> TCM a
 with bs m = TCM (tell (Ctx (Map.fromList bs) mempty)) >> m
 
-liftMaybe :: String -> Maybe a -> TCM a
+liftMaybe :: [Text] -> Maybe a -> TCM a
 liftMaybe _ (Just x) = pure x
-liftMaybe e Nothing  = fail e
+liftMaybe e Nothing  = failure e
 
 retrieveVar :: Name -> TCM DTerm
-retrieveVar n = let err = "Could not find variable: " <> show n
+retrieveVar n = let err = ["Could not find variable: ", tshow n]
                 in get >>= _environment .> Map.lookup n .> liftMaybe err
 
 (∋) :: DTerm -> DTerm -> TCM ()
-(∋) = \ty tm -> Tr.trace (pretty ty <> " ∋ " <> pretty tm) (check tm ty)
+(∋) = \ty tm -> trace (pretty ty <> " ∋ " <> pretty tm) (check tm ty)
   where
     check :: DTerm -> DTerm -> TCM ()
     check DStar        DStar        = pure ()
@@ -155,8 +165,7 @@ retrieveVar n = let err = "Could not find variable: " <> show n
                                          tm' <- evaluateTerm tm
                                          ty' <- evaluateTerm ty
                                          guard $ tm' ≡ ty'
-    check ty           tm           = [ pretty ty, " ∌ ", pretty tm
-                                      ] |> mconcat |> fail
+    check ty           tm           = [pretty ty, " ∌ ", pretty tm] |> failure
 
 inferType :: DElim -> TCM DTerm
 inferType (tm ::: ty) = do DStar ∋ ty

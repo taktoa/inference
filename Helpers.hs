@@ -1,5 +1,19 @@
 module Helpers where
 
+import qualified Debug.Trace as Trace
+
+import           Data.Text   (Text)
+import qualified Data.Text   as T
+
+trace :: Text -> a -> a
+trace t = Trace.trace (T.unpack t)
+
+failure :: (Monad m) => [Text] -> m a
+failure = mconcat .> T.unpack .> fail
+
+tshow :: (Show s) => s -> Text
+tshow = show .> T.pack
+
 (≡) :: (Eq a) => a -> a -> Bool
 (≡) = (==)
 infix 4 ≡
