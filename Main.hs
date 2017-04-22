@@ -35,8 +35,6 @@ import           Data.Hashable              (Hashable)
 import           Data.String                (IsString (..))
 import           GHC.Generics               (Generic)
 
-import           Control.Concurrent.Supply
-
 import           Helpers
 import           Supply
 
@@ -44,48 +42,65 @@ newtype Name
   = MkName Text
   deriving (Eq, Show, Read, Generic)
 
+data Named a
+  = Named
+    { _namedName  :: {-# UNPACK #-} !Name
+    , _namedValue :: {-# UNPACK #-} !a
+    }
+  deriving (Eq, Show, Read, Generic)
+
 instance IsString Name where
   fromString = T.pack .> MkName
 
-data DTerm
+data DTerm' n
   = DStar
   | DConst !Text
-  | D_ DElim
-  | DΠ Name DTerm DTerm
-  | Dλ Name DTerm
+  | D_ (DElim' n)
+  | DΠ !n (DTerm' n) (DTerm' n)
+  | Dλ !n (DTerm' n)
   deriving (Eq, Show, Read, Generic)
 
 instance IsString DTerm where
   fromString = T.pack .> DConst
 
-data DElim = DTerm ::: DTerm
-           | DElim :@: DTerm
-           | DRef Name
-           deriving (Eq, Show, Read, Generic)
+data DElim' n
+  = (DTerm' n) ::: (DTerm' n)
+  | (DElim' n) :@: (DTerm' n)
+  | DRef n
+  deriving (Eq, Show, Read, Generic)
 
 instance IsString DElim where
-  fromString = DRef . fromString
+  fromString = fromString .> DRef
 
-data DConstraint = DTerm :≡: DTerm
-                 deriving (Eq, Show, Read, Generic)
+type DTerm = DTerm' Name
 
-data Ctx = Ctx { _environment :: HashMap Name DTerm
-               , _constraints :: HashSet DConstraint }
-         deriving (Eq, Show, Read, Generic)
+type DElim = DElim' Name
+
+data DConstraint
+  = DTerm :≡: DTerm
+  deriving (Eq, Show, Read, Generic)
+
+data Context
+  = MkContext
+    { _environment :: HashMap Name DTerm
+    , _constraints :: HashSet DConstraint
+    }
+  deriving (Eq, Show, Read, Generic)
 
 instance Hashable Name
 instance Hashable DTerm
 instance Hashable DElim
 instance Hashable DConstraint
 
-instance Monoid Ctx where
-  mempty = Ctx mempty mempty
-  mappend (Ctx m1 s1) (Ctx m2 s2) = Ctx (m1 <> m2) (s1 <> s2)
+instance Monoid Context where
+  mempty = MkContext mempty mempty
+  mappend (MkContext m1 s1) (MkContext m2 s2)
+    = MkContext (m1 <> m2) (s1 <> s2)
 
 newtype TCM a
-  = TCM (StateT Ctx (Either String) a)
+  = TCM (StateT Context (Either String) a)
   deriving ( Functor, Applicative, Alternative
-           , Monad, MonadPlus, MonadState Ctx )
+           , Monad, MonadPlus, MonadState Context )
 
 data Replace = Name :~> DElim
 
