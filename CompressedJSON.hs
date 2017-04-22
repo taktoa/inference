@@ -4,44 +4,47 @@
 {-# LANGUAGE PatternSynonyms            #-}
 {-# LANGUAGE RecordWildCards            #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE Strict                     #-}
 
 module CompressedJSON
   ( module CompressedJSON
   ) where
 
 import           Control.Monad
-import           Control.Monad.Reader   (Reader, ask, runReader)
-import           Control.Monad.State    (State, runState, state)
+import           Control.Monad.Reader       (Reader, ask, runReader)
+import           Control.Monad.State.Strict (State, runState, state)
 
-import           Data.Vector            (Vector)
-import qualified Data.Vector            as V
+import           Data.Vector                (Vector)
+import qualified Data.Vector                as V
+import           Data.Vector.Mutable        (MVector)
+import qualified Data.Vector.Mutable        as MV
 
-import           Data.Scientific        (Scientific)
-import qualified Data.Scientific        as Sci
+import           Data.Scientific            (Scientific)
+import qualified Data.Scientific            as Sci
 
-import qualified Data.HashMap.Lazy      as LHM
+import qualified Data.HashMap.Lazy          as LHM
 
-import qualified Data.ByteString        as BS
-import qualified Data.ByteString.Lazy   as LBS
+import qualified Data.ByteString            as BS
+import qualified Data.ByteString.Lazy       as LBS
 
-import           Data.Binary            (Binary (..))
-import qualified Data.Binary            as Binary
+import           Data.Binary                (Binary (..))
+import qualified Data.Binary                as Binary
 
-import           Data.Text              (Text)
+import           Data.Text                  (Text)
 
-import           Data.IntMap            (IntMap)
-import qualified Data.IntMap            as IMap
+import           Data.IntMap                (IntMap)
+import qualified Data.IntMap                as IMap
 
-import qualified Data.Foldable          as Seq (toList)
-import           Data.Sequence          (Seq)
-import qualified Data.Sequence          as Seq
+import qualified Data.Foldable              as Seq (toList)
+import           Data.Sequence              (Seq)
+import qualified Data.Sequence              as Seq
 
-import           Control.Lens           hiding ((.>), (<.), (<|), (|>))
+import           Control.Lens               hiding ((.>), (<.), (<|), (|>))
 
-import qualified Data.Aeson             as A
-import qualified Data.Aeson.Lens        as Lens
+import qualified Data.Aeson                 as A
+import qualified Data.Aeson.Lens            as Lens
 
-import qualified Codec.Compression.GZip as GZ
+import qualified Codec.Compression.GZip     as GZ
 
 import           Data.Word
 
@@ -115,7 +118,10 @@ compressValue = go
                         in CVObject <$> internObject ks <*> compressList vs
 
     compressList :: [A.Value] -> CompressM (Vector CValue)
-    compressList = mapM go .> fmap V.fromList
+    compressList cs = fmap V.fromList
+                      $ if length cs > 32
+                        then map (compressJSON .> CVCompressed) cs |> pure
+                        else cs |> mapM go
 
     scientificToCV :: Scientific -> CValue
     scientificToCV sci = fromMaybe (CVFloat sci) $ cvInteger sci
@@ -150,12 +156,12 @@ lookupObj (MkObjectId oid) = MkDecompressM $ do (MkCVDict _ objs) <- ask
                                                 V.indexM objs oid
 
 newtype CompressM a
-  = MkCompressM (State Dict a)
+  = MkCompressM (State CVDict a)
   deriving (Functor, Applicative, Monad)
 
 runCompressM :: CompressM a -> (CVDict, a)
-runCompressM (MkCompressM m) = runState m (MkDict mempty mempty)
-                               |> (\(x, dict) -> (cvdFromDict dict, x))
+runCompressM (MkCompressM m) = runState m (MkCVDict mempty mempty)
+                               |> (\(x, dict) -> (dict, x))
 
 internString :: Text -> CompressM StringId
 internString str = MkCompressM $ state (addStringToDict str)
@@ -163,19 +169,13 @@ internString str = MkCompressM $ state (addStringToDict str)
 internObject :: [Key] -> CompressM ObjectId
 internObject ks = MkCompressM $ state (addObjectToDict (V.fromList ks))
 
-data Dict
-  = MkDict
-    { _dictStrings :: Seq Text
-    , _dictObjects :: Seq (Vector Key)
-    }
+addStringToDict :: Text -> CVDict -> (StringId, CVDict)
+addStringToDict str (MkCVDict strs objs)
+  = (MkStringId (V.length strs), MkCVDict (strs :> str) objs)
 
-addStringToDict :: Text -> Dict -> (StringId, Dict)
-addStringToDict str (MkDict strs objs)
-  = (MkStringId (Seq.length strs), MkDict (strs :> str) objs)
-
-addObjectToDict :: Vector Key -> Dict -> (ObjectId, Dict)
-addObjectToDict keys (MkDict strs objs)
-  = (MkObjectId (Seq.length objs), MkDict strs (objs :> keys))
+addObjectToDict :: Vector Key -> CVDict -> (ObjectId, CVDict)
+addObjectToDict keys (MkCVDict strs objs)
+  = (MkObjectId (V.length objs), MkCVDict strs (objs :> keys))
 
 data CVDict
   = MkCVDict
@@ -195,9 +195,9 @@ instance Binary CVDict
 --         <$> (get <#> GZ.decompress .> Binary.decode)
 --         <*> (get <#> GZ.decompress .> Binary.decode)
 
-cvdFromDict :: Dict -> CVDict
-cvdFromDict (MkDict strs objs) = let seqToV = Seq.toList .> V.fromList
-                                 in MkCVDict (seqToV strs) (seqToV objs)
+-- cvdFromDict :: Dict -> CVDict
+-- cvdFromDict (MkDict strs objs) = let seqToV = Seq.toList .> V.fromList
+--                                  in MkCVDict (seqToV strs) (seqToV objs)
 
 data CValue
   = CVNull

@@ -589,27 +589,17 @@ inferType (DRef n)    = lookupVar n >>= eval
 
 -- 209427982
 -- 108406752
+
 main :: IO ()
 main = do
-  do ff <- fullFile
-     Binary.encode ff |> GZ.compress |> LBS.writeFile "./full.json.gz"
+  do cff <- fullFile <#> compressJSON
+     Binary.encode cff |> LBS.writeFile "./full.dat"
      pure ()
   performGC
-  do ff <- LBS.readFile "/tmp/full.json.gz" <#> GZ.decompress
-     Binary.decode ff |> computeSizes |> printMap
+  do cff <- LBS.readFile "./full.dat"
+     Binary.decode cff |> decompressJSON |> computeSizes |> printMap
      pure ()
   pure ()
-
--- main :: IO ()
--- main = do
---   do cff <- fullFile <#> compressJSON
---      Binary.encode cff |> LBS.writeFile "/tmp/full.dat"
---      pure ()
---   performGC
---   do cff <- LBS.readFile "/tmp/full.dat"
---      Binary.decode cff |> decompressJSON |> computeSizes |> printMap
---      pure ()
---   pure ()
 
 -- main :: HCS => IO ()
 -- main = do
