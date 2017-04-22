@@ -72,26 +72,49 @@ import qualified Data.Aeson.BetterErrors           as ABE
 import qualified Data.Aeson.Encode.Pretty          as A
 import qualified Data.Aeson.Types                  as A
 
+import qualified Data.Yaml                         as Yaml
+import qualified Data.Yaml.Pretty                  as Yaml
+
+import           Text.PrettyPrint.ANSI.Leijen      (Doc, Pretty (..))
+import qualified Text.PrettyPrint.ANSI.Leijen      as PP
+
+import           Data.Scientific                   (Scientific)
+import qualified Data.Scientific                   as Sci
+
 import           Data.Version
+
+import           Data.Binary                       (Binary)
+import qualified Data.Binary                       as Binary
 
 import qualified Language.PureScript.AST.Literals  as PS
 import qualified Language.PureScript.AST.SourcePos as PS
 import qualified Language.PureScript.Comments      as PS
 import qualified Language.PureScript.Names         as PS
+import qualified Language.PureScript.PSString      as PS
 import qualified Language.PureScript.Types         as PS
 
 import           Language.PureScript.AST.Literals  (Literal (..))
 import           Language.PureScript.Names
 
+import           System.Mem
+
 import           Evaluable
+-- import           PureScript.Types
+import           CompressedJSON
+import           PrettyJSON
 import           Types
 import           Utils
 
-data CustomJSONError = CustomJSONError Text
-                     deriving (Eq, Show)
+type LHM k v = LHM.HashMap k v
+
+instance (Eq k, Hashable k, Binary k, Binary v) => Binary (LHM k v) where
+  put = LHM.toList .> V.fromList .> Binary.put
+  get = Binary.get <#> V.toList .> LHM.fromList
+
+deriving instance Generic Value
+instance Binary Value
 
 type JParse a = A.Parser a
--- type JParse a = ABE.Parse CustomJSONError a
 type JSON = Value
 
 type AnnParser a = JSON -> JParse (a, JSON)
@@ -99,8 +122,7 @@ type AnnParser a = JSON -> JParse (a, JSON)
 type HCS = Stack.HasCallStack
 type StrLike str = (Monoid str, IsList str, Item str ~ Char)
 
-failure :: forall str m a. (HCS, StrLike str, Monad m)
-        => [str] -> m a
+failure :: forall str m a. (HCS, StrLike str, Monad m) => [str] -> m a
 failure xs = [ stackTrace
              , "\n\n"
              , toList $ mconcat xs
@@ -127,7 +149,10 @@ runInsideAP' :: HCS => AnnParser a -> JSON -> (a -> JSON -> JParse b) -> JParse 
 runInsideAP' annP v cb = annP v >>= uncurry cb
 
 backtrace :: HCS => Text -> (JSON -> JParse a) -> JSON -> JParse a
-backtrace msg f v = f v -- <|> failure [msg]
+backtrace msg f v = f v <|> failure [msg, "\n\n", prettyJSON v]
+  where
+    prettyJSON :: JSON -> Text
+    prettyJSON = PP.pretty .> show .> T.pack
 
 choice :: HCS => (Alternative f) => [f a] -> f a
 choice = asum
@@ -245,13 +270,14 @@ parseLiteral cb = backtrace "parseLiteral"
   where
     dispatch :: HCS => [(Text, JSON -> JParse (Literal JSON))]
     dispatch = let go f = parseJSON .> fmap f
+                   fromMap = LHM.toList .> fmap (first PS.mkString)
                in [ ("IntLiteral",     go (Left  .> NumericLiteral))
                   , ("NumberLiteral",  go (Right .> NumericLiteral))
                   , ("StringLiteral",  go StringLiteral)
                   , ("CharLiteral",    go CharLiteral)
                   , ("BooleanLiteral", go BooleanLiteral)
                   , ("ArrayLiteral",   go ArrayLiteral)
-                  , ("ObjectLiteral",  go (LHM.toList .> ObjectLiteral)) ]
+                  , ("ObjectLiteral",  go (fromMap .> ObjectLiteral)) ]
 
 parseBinder :: forall ann. HCS => AnnParser ann -> JSON -> JParse (Binder ann)
 parseBinder annP = backtrace "parseBinder"
@@ -529,11 +555,11 @@ jsonSize _          = 1
 
 deriving instance Generic (Literal a)
 instance (ToJSON a) => ToJSON (CaseAlternative a)
-instance (ToJSON a) => ToJSON (Literal a)
 instance (ToJSON a) => ToJSON (Expr a)
 instance (ToJSON a) => ToJSON (Binder a)
 instance (ToJSON a) => ToJSON (Bind a)
 instance (ToJSON a) => ToJSON (Module a)
+
 
 
 
@@ -561,8 +587,32 @@ inferType (el :@: tm) = do DΠ v vT bT <- inferType el
                            eval $ bT `subst` [v :~> (tm ::: vT)]
 inferType (DRef n)    = lookupVar n >>= eval
 
-main :: HCS => IO ()
+-- 209427982
+-- 108406752
+main :: IO ()
 main = do
-  Right complete <- completeFile <#> A.parseEither (parseModules defAnnP)
-  A.encode complete |> GZ.compress |> Base64.encode |> LBS.putStrLn
+  do ff <- fullFile
+     Binary.encode ff |> GZ.compress |> LBS.writeFile "./full.json.gz"
+     pure ()
+  performGC
+  do ff <- LBS.readFile "/tmp/full.json.gz" <#> GZ.decompress
+     Binary.decode ff |> computeSizes |> printMap
+     pure ()
   pure ()
+
+-- main :: IO ()
+-- main = do
+--   do cff <- fullFile <#> compressJSON
+--      Binary.encode cff |> LBS.writeFile "/tmp/full.dat"
+--      pure ()
+--   performGC
+--   do cff <- LBS.readFile "/tmp/full.dat"
+--      Binary.decode cff |> decompressJSON |> computeSizes |> printMap
+--      pure ()
+--   pure ()
+
+-- main :: HCS => IO ()
+-- main = do
+--   Right complete <- completeFile <#> A.parseEither (parseModules defAnnP)
+--   A.encode complete |> GZ.compress |> Base64.encode |> LBS.putStrLn
+--   pure ()

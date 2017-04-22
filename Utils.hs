@@ -33,6 +33,11 @@ import           Control.Lens.Cons            as Exported hiding ((<|), (|>))
 
 import qualified Data.Text                    as T
 
+import           Data.Binary                  as Binary
+
+import           Data.Vector                  (Vector)
+import qualified Data.Vector                  as V
+
 import           Text.ParserCombinators.ReadP
 
 -- | Function composition.
@@ -131,3 +136,7 @@ pattern SGRYellow  = 33
 pattern SGRBlue    = 34
 pattern SGRMagenta = 35
 pattern SGRCyan    = 36
+
+instance (Binary v) => Binary (Vector v) where
+  put = V.toList .> Binary.put
+  get = Binary.get <#> V.fromList
