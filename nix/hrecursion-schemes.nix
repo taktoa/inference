@@ -4,8 +4,8 @@ mkDerivation {
   version = "0.1.0.0";
   src = fetchgit {
     url = "https://github.com/mckeankylej/hrecursion-schemes";
-    sha256 = "1amlfc7ykp5gmx70vy9kis3sh0jxn2s8b9bpg8705zqhj47qlsxz";
-    rev = "d70176731449f4565f0f8bb690405ef344afdb0c";
+    sha256 = "0a4y6z0pgzgpbfd4p4kgcr9lbiwpv70abgw6chzgm04w17lbz7wx";
+    rev = "53ab9859d0bb5fb7f5974d0cf04c826764efe867";
   };
   libraryHaskellDepends = [ base ];
   description = "Higher order recursion schemes";
