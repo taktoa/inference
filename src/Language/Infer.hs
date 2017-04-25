@@ -127,15 +127,15 @@ printAST :: forall v u c k. (TextShow u, TextShow c) => AST v u c k -> Text
 printAST = cata alg .> getConst .> LT.toLazyText .> LT.toStrict
   where
     alg :: ASTF v u c (Const LT.Builder) ~> Const LT.Builder
-    alg = (\case Universe u    -> [ T.showb u ]
-                 Constant c    -> [ T.showb c ]
-                 Embed e       -> [ "{", getConst e, "}" ]
-                 Pi x s t      -> [ "(", "⟨", T.showb x, " : ", getConst s, "⟩"
-                                  , " → ", getConst t, ")" ]
-                 Lam x t       -> [ "(", T.showb x, " ↦ ", getConst t, ")" ]
-                 Ref v         -> [ T.showb v ]
-                 tm ::: ty     -> [ getConst tm, " ∷ ", getConst ty ]
-                 f :@: s       -> [ getConst f, " ", getConst s ])
+    alg = (\case Universe u -> [ T.showb u ]
+                 Constant c -> [ T.showb c ]
+                 Embed e    -> [ "{", getConst e, "}" ]
+                 Pi v vT bT -> [ "(", "(", T.showb v, " : ", getConst vT, ")"
+                               , " -> ", getConst bT, ")" ]
+                 Lam v b    -> [ "(\\", T.showb v, " -> ", getConst b, ")" ]
+                 Ref v      -> [ T.showb v ]
+                 tm ::: ty  -> [ getConst tm, " : ", getConst ty ]
+                 el :@: tm  -> [ getConst el, " ", getConst tm ])
           .> mconcat
           .> Const
 
