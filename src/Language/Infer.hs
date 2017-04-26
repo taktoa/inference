@@ -13,6 +13,7 @@
 {-# LANGUAGE ScopedTypeVariables  #-}
 {-# LANGUAGE TypeFamilies         #-}
 {-# LANGUAGE TypeOperators        #-}
+{-# LANGUAGE TypeApplications     #-}
 module Language.Infer where
 
 import           Prelude                      hiding (pi)
@@ -124,8 +125,8 @@ tm .:. ty = HFix (tm ::: ty)
 el .@. tm = HFix (el :@: tm)
 
 -- | Print the AST in plain ASCII.
-printAST :: forall v u c k. (TextShow u, TextShow c) => AST v u c k -> Text
-printAST = cata alg .> getConst .> LT.toLazyText .> LT.toStrict
+printAscii :: forall v u c k. (TextShow u, TextShow c) => AST v u c k -> Text
+printAscii = cata alg .> getConst .> LT.toLazyText .> LT.toStrict
   where
     alg :: ASTF v u c (Const LT.Builder) ~> Const LT.Builder
     alg = (\case Universe u -> [ T.showb u ]
@@ -141,8 +142,8 @@ printAST = cata alg .> getConst .> LT.toLazyText .> LT.toStrict
           .> Const
 
 -- | Print the AST with fancy Unicode.
-pprintAST :: forall v u c k. (TextShow u, TextShow c) => AST v u c k -> Text
-pprintAST = cata alg .> getConst .> LT.toLazyText .> LT.toStrict
+printUnicode :: forall v u c k. (TextShow u, TextShow c) => AST v u c k -> Text
+printUnicode = cata alg .> getConst .> LT.toLazyText .> LT.toStrict
   where
     alg :: ASTF v u c (Const LT.Builder) ~> Const LT.Builder
     alg = (\case Universe u -> [ T.showb u ]
@@ -160,16 +161,13 @@ pprintAST = cata alg .> getConst .> LT.toLazyText .> LT.toStrict
 instance (Pretty u, Pretty c) => Pretty (AST v u c k) where
   pretty = cata alg .> getConst
     where
-      single :: a -> [a]
-      single = pure
-
       alg :: ASTF v u c (Const Doc) ~> Const Doc
       alg = (\case Universe u -> [ pretty u ]
                    Constant c -> [ pretty c ]
                    Embed el   -> [ "⸨", getConst el, "⸩" ]
                    Pi v vT bT -> [ "⟨", pretty v, " : ", getConst vT, "⟩"
                                  , " → ", getConst bT
-                                 ] |> mconcat |> PP.parens |> single
+                                 ] |> mconcat |> PP.parens |> pure @[]
                    Lam v b    -> [ "(", pretty v, " ↦ ", getConst b, ")" ]
                    Ref v      -> [ pretty v ]
                    tm ::: ty  -> [ getConst tm, " ∷ ", getConst ty ]
