@@ -13,7 +13,7 @@ import           Control.Monad       as Exported
 import           Data.Either         as Exported
 import           Data.Foldable       as Exported (asum)
 import           Data.Maybe          as Exported
-import           Data.Monoid         as Exported
+import           Data.Monoid         as Exported hiding (Product(..))
 
 import           Data.Text           as Exported (Text)
 
