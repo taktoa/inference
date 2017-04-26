@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -22,7 +23,11 @@ import qualified Data.Text.Lazy.Builder as LT
 import GHC.Generics
 
 import Data.Functor.Const (Const(..))
+import Data.Functor.Product (Product(..))
 import Data.HFunctor.Foldable (HFix(..),type (~>),HFunctor(..),Recursive(..))
+
+import Control.Monad.Reader (ReaderT(..))
+import qualified Data.Map.Strict as M
 
 newtype Name = Name
   { getName :: T.Text }
@@ -60,6 +65,8 @@ data ASTF v u c f (k :: Kind) where
   Ref :: Named v -> ASTF v u c f Elim
   (:::) :: f Term -> f Term -> ASTF v u c f Elim
   (:@:) :: f Elim -> f Term -> ASTF v u c f Elim
+
+deriving instance (Show v, Show u, Show c, Show (f Term), Show (f Elim)) => Show (ASTF v u c f k)
 
 instance HFunctor (ASTF v u c) where
   hfmap eta = \case
@@ -116,8 +123,3 @@ pprintAST = LT.toStrict . LT.toLazyText . getConst . cata alg
           Ref v -> T.showb v
           t ::: typ -> getConst t <> " : " <> getConst typ
           f :@: s -> getConst f <> " " <> getConst s
-
-data Star = Star
-
-instance T.TextShow Star where
-  showb _ = "Star"
