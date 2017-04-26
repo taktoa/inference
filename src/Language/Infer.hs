@@ -112,11 +112,17 @@ pi' v = pi (named v)
 lam :: Named v -> AST v u c Term -> AST v u c Term
 lam v b = HFix (Lam v b)
 
+lam' :: T.Text -> AST T.Text u c Term -> AST T.Text u c Term
+lam' v = lam (named v)
+
 ref :: Named v -> AST v u c Elim
 ref v = HFix (Ref v)
 
 ref' :: Text -> AST Text u c Elim
 ref' v = ref (named v)
+
+refE :: Text -> AST Text u c Term
+refE = embed . ref'
 
 (.:.) :: AST v u c Term -> AST v u c Term -> AST v u c Elim
 tm .:. ty = HFix (tm ::: ty)
