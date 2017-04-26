@@ -138,9 +138,9 @@ printAscii = cata alg .> getConst .> LT.toLazyText .> LT.toStrict
     alg = (\case Universe u -> [ T.showb u ]
                  Constant c -> [ T.showb c ]
                  Embed e    -> [ "{", getConst e, "}" ]
-                 Pi v vT bT -> [ "(", "(", T.showb v, " : ", getConst vT, ")"
-                               , " -> ", getConst bT, ")" ]
-                 Lam v b    -> [ "(\\", T.showb v, " -> ", getConst b, ")" ]
+                 Pi v vT bT -> [ "(", T.showb v, " : ", getConst vT, ")"
+                               , " -> ", getConst bT ]
+                 Lam v b    -> [ "\\", T.showb v, " -> ", getConst b ]
                  Ref v      -> [ T.showb v ]
                  tm ::: ty  -> [ getConst tm, " : ", getConst ty ]
                  el :@: tm  -> [ getConst el, " ", getConst tm ])
@@ -155,9 +155,9 @@ printUnicode = cata alg .> getConst .> LT.toLazyText .> LT.toStrict
     alg = (\case Universe u -> [ T.showb u ]
                  Constant c -> [ T.showb c ]
                  Embed el   -> [ "⸨", getConst el, "⸩" ]
-                 Pi v vT bT -> [ "(", "⟨", T.showb v, " : ", getConst vT, "⟩"
-                               , " → ", getConst bT, ")" ]
-                 Lam v b    -> [ "(", T.showb v, " ↦ ", getConst b, ")" ]
+                 Pi v vT bT -> [ "⟨", T.showb v, " : ", getConst vT, "⟩"
+                               , " → ", getConst bT ]
+                 Lam v b    -> [ "λ", T.showb v, " ↦ ", getConst b ]
                  Ref v      -> [ T.showb v ]
                  tm ::: ty  -> [ getConst tm, " ∷ ", getConst ty ]
                  el :@: tm  -> [ getConst el, " ", getConst tm ])
@@ -172,9 +172,8 @@ instance (Pretty u, Pretty c) => Pretty (AST v u c k) where
                    Constant c -> [ pretty c ]
                    Embed el   -> [ "⸨", getConst el, "⸩" ]
                    Pi v vT bT -> [ "⟨", pretty v, " : ", getConst vT, "⟩"
-                                 , " → ", getConst bT
-                                 ] |> mconcat |> PP.parens |> pure @[]
-                   Lam v b    -> [ "(", pretty v, " ↦ ", getConst b, ")" ]
+                                 , " → ", getConst bT ]
+                   Lam v b    -> [ "λ", pretty v, " ↦ ", getConst b ]
                    Ref v      -> [ pretty v ]
                    tm ::: ty  -> [ getConst tm, " ∷ ", getConst ty ]
                    el :@: tm  -> [ getConst el, " ", getConst tm ])
@@ -192,3 +191,6 @@ data Star
 
 instance T.TextShow Star where
   showb Star = "⋆"
+
+instance Pretty Star where
+  pretty Star = "⋆"
